@@ -1,0 +1,10 @@
+[project]
+name = "misty-core"
+version = "0.1.0"
+description = "Misty's pure domain model: tasks, edit types, and the reducer. No IO."
+requires-python = ">=3.14"
+dependencies = ["pydantic>=2.11"]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"

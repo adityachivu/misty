@@ -1,0 +1,17 @@
+[project]
+name = "misty-server"
+version = "0.1.0"
+description = "taskd: serves the Misty database over REST (and later MCP), plus the misty CLI."
+requires-python = ">=3.14"
+dependencies = ["misty-core", "misty-store", "fastapi>=0.115", "uvicorn>=0.32", "typer>=0.15"]
+
+[project.scripts]
+misty = "misty_server.cli:app"
+
+[tool.uv.sources]
+misty-core = { workspace = true }
+misty-store = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"

@@ -1,0 +1,215 @@
+/* Ported from ~/code/dartboard/public/board.css. Dark by default: a white flash on every new tab is a tax. */
+:root {
+  --bg: #16161a;
+  --fg: #e4e4e7;
+  --muted: #9b9ba6;
+  --faint: #56565e;
+  --line: #34343b;
+  --dot: #2c2c37;
+  --dot-hi: #3a3a47;
+  --accent: #7c6cf5;
+  --red: #e5534b;
+  --yellow: #d9a441;
+  --lane: #ffffff;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fbfbfc; --fg: #1e1e24; --muted: #6c6c76; --faint: #a3a3ad;
+    --line: #dcdce2; --dot: #ffffff; --dot-hi: #f4f4f7; --accent: #5b4bd4;
+    --red: #cc3b33; --yellow: #a87615; --lane: #000000;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.4 ui-sans-serif, -apple-system, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#viewport {
+  position: fixed; inset: 0; overflow: hidden;
+  cursor: grab; opacity: 0; transition: opacity .18s ease;
+}
+#viewport[data-ready] { opacity: 1; }
+#viewport.is-panning { cursor: grabbing; }
+
+#camera { position: absolute; transform-origin: 0 0; will-change: transform; }
+#chrome { position: absolute; inset: 0; }
+#bubbles { position: absolute; inset: 0; }
+
+/* ── chrome ───────────────────────────────────────────────────────────────── */
+.lane { stroke: var(--lane); }
+.lane-a { opacity: .04; }
+.lane-b { opacity: .08; }
+.lane-overdue { stroke: var(--red); opacity: .08; }
+.overdue-ring { stroke: var(--red); stroke-width: 2; opacity: .45; fill: none; }
+.divider { stroke: var(--line); stroke-width: 2; opacity: .4; }
+.quad { fill: var(--muted); font-size: 30px; font-weight: 600; letter-spacing: .04em; }
+.band-lbl { fill: var(--faint); font-size: 19px; }
+
+/* ── bubble ───────────────────────────────────────────────────────────────── */
+.bubble {
+  position: absolute; left: 0; top: 0;
+  border-radius: 50%;
+  background: var(--dot);
+  border: 3px dashed var(--muted);      /* dashed = not broken down yet */
+  display: grid; place-items: center;
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+  overflow: hidden;
+}
+.bubble.has-kids { border-style: solid; }
+.bubble.is-overdue { border-color: var(--red); background: color-mix(in srgb, var(--red) 22%, var(--dot)); }
+.bubble:hover { background: var(--dot-hi); }
+.bubble.is-open { border-color: var(--accent); border-width: 4px; z-index: 6; }
+.bubble.is-done { opacity: .35; }
+
+/* pending: staged but not yet drained by misty */
+.bubble.is-pending { box-shadow: 0 0 0 3px var(--bg), 0 0 0 6px var(--yellow); }
+
+/* Content is vertically CENTRED, always. A circle is widest across its middle,
+   so centred content stays inside the rim; anchoring it to the top or bottom
+   pushes text into the narrow part where it crosses the boundary. The controls
+   therefore also sit near the centre — that is fine, because opening is a
+   single click on a small idle bubble (nothing under the cursor to mis-hit),
+   and the big open bubble has ample empty rim to click for closing. */
+.body {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 5px; width: 82%; height: 82%;    /* inside the inscribed square, with margin */
+  text-align: center; pointer-events: none;
+}
+
+.text {
+  font-size: 14px; line-height: 1.25; color: var(--fg); font-weight: 500;
+  overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3; overflow-wrap: break-word; width: 100%;
+}
+.bubble.is-open > .body > .text { font-size: 16px; -webkit-line-clamp: 3; font-weight: 600; }
+.bubble.is-done .text { text-decoration: line-through; }
+
+.zap { font-size: 16px; line-height: 1; }
+.meta {
+  font-size: 11px; color: var(--muted); white-space: nowrap;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ── emoji row — only when open ────────────────────────────────────────────── */
+/* Wraps: 7–8 controls don't fit one line inside the circle. The row is part of
+   the centred content group, so the wrap doesn't push anything off-centre. */
+.emoji-row {
+  display: none; flex-wrap: wrap; gap: 3px;
+  justify-content: center; align-items: center;
+  max-width: 100%; pointer-events: auto;
+}
+.bubble.is-open > .body > .emoji-row { display: flex; }
+.emoji {
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  font-size: 15px; line-height: 1; padding: 3px 4px; cursor: pointer;
+  opacity: .8; transition: all .1s ease;
+}
+.emoji:hover { background: var(--dot-hi); border-color: var(--line); opacity: 1; transform: translateY(-1px); }
+.emoji.is-on { opacity: 1; background: color-mix(in srgb, var(--yellow) 28%, transparent); }
+
+/* ── children — the subtasks, shown inside an open bubble ──────────────────── */
+/* A kid IS a bubble: same markup, same state classes, so every rule above works
+   on it unchanged. It only stops being absolutely positioned and starts being
+   laid out by its parent's flexbox. */
+.kids { display: none; flex-wrap: wrap; gap: 6px; justify-content: center; align-items: center; }
+.bubble.is-open > .body > .kids { display: flex; }
+
+.bubble.kid {
+  position: relative; flex: 0 0 auto;
+  border-width: 2px; background: var(--bg);
+  /* .body sets pointer-events:none, and a kid inherits it. That inertness IS
+     the bug where clicking a subtask fell through to the parent's handler and
+     collapsed the whole bubble. */
+  pointer-events: auto;
+}
+.bubble.kid.is-open { border-width: 3px; }
+.bubble.kid .text { color: var(--muted); }
+.bubble.kid.is-new { border-color: var(--yellow); }
+.bubble.kid.is-new .text, .bubble.kid.is-open .text { color: var(--fg); }
+
+.bubble.kid .text { font-size: 11px; -webkit-line-clamp: 3; }
+.bubble.kid.is-open > .body > .text { font-size: 13px; -webkit-line-clamp: 3; }
+.bubble.kid .meta { font-size: 9px; }
+.bubble.kid .zap { font-size: 11px; }
+.bubble.kid .emoji { font-size: 12px; padding: 2px 3px; }
+.bubble.kid .invite input, .bubble.kid .datepick input { font-size: 10px; padding: 3px 5px; }
+.bubble.kid .hint { font-size: 8px; }
+.bubble.is-d2 .text { font-size: 9px; }
+.bubble.is-d2.is-open > .body > .text { font-size: 11px; }
+.bubble.kid > .body { gap: 3px; }
+
+/* ── the invitation ───────────────────────────────────────────────────────── */
+.invite, .datepick { display: none; pointer-events: auto; width: 82%; }
+.invite input, .datepick input {
+  width: 100%; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 7px; font: inherit; font-size: 12px; text-align: center;
+}
+.invite input:focus, .datepick input:focus { outline: none; border-color: var(--accent); }
+.invite .hint, .datepick .hint { font-size: 10px; color: var(--muted); margin-top: 4px; }
+/* the native picker is a browser popup, not a DOM child — overflow:hidden on the
+   bubble does not clip it, and unlike prompt() it never blocks the JS thread */
+.datepick input[type="date"] { cursor: pointer; }
+
+/* ── hud ──────────────────────────────────────────────────────────────────── */
+#hud {
+  position: fixed; top: 20px; left: 24px; pointer-events: none;
+  font-size: 12px; color: var(--muted); line-height: 1.7;
+}
+#hud .count { color: var(--fg); font-size: 14px; }
+#hud .pending { color: var(--yellow); }
+#hud .keys { color: var(--faint); font-size: 11px; margin-top: 6px; }
+
+/* ── toolbar — add task / reset all ──────────────────────────────────────── */
+#toolbar { position: fixed; top: 20px; right: 24px; text-align: right; }
+.tool-row { display: flex; gap: 6px; justify-content: flex-end; }
+.tool-btn {
+  background: var(--dot); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 6px; font: inherit; font-size: 12px; padding: 6px 10px;
+  cursor: pointer; transition: all .1s ease;
+}
+.tool-btn:hover { background: var(--dot-hi); border-color: var(--accent); }
+#resetBtn.is-confirming { background: color-mix(in srgb, var(--red) 28%, var(--dot)); border-color: var(--red); }
+
+#addPanel {
+  margin-top: 8px; padding: 10px; width: 220px;
+  background: var(--dot); border: 1px solid var(--line); border-radius: 8px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+/* [hidden] and `display: flex` above are equal specificity — without this,
+   source order lets the flex rule win and the panel never actually hides. */
+#addPanel[hidden] { display: none; }
+.cat-row { display: flex; gap: 4px; }
+.cat-btn {
+  flex: 1; background: var(--bg); color: var(--muted); border: 1px solid var(--line);
+  border-radius: 5px; font: inherit; font-size: 11px; padding: 5px 0; cursor: pointer;
+}
+.cat-btn:hover { border-color: var(--accent); }
+.cat-btn.is-selected { color: var(--fg); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--bg)); }
+#addPanel input {
+  width: 100%; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 8px; font: inherit; font-size: 12px;
+}
+#addPanel input:focus { outline: none; border-color: var(--accent); }
+#addPanel .hint { font-size: 10px; color: var(--muted); text-align: center; }
+
+#flash {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  background: var(--red); color: #fff; padding: 8px 14px; border-radius: 6px; font-size: 12px;
+}
+
+.fatal {
+  position: fixed; inset: 0; display: grid; place-content: center;
+  text-align: center; color: var(--muted); line-height: 2.2;
+}
+.fatal code {
+  background: var(--dot); border: 1px solid var(--line); border-radius: 6px;
+  padding: 7px 12px; display: inline-block; color: var(--fg);
+}
+.fatal .err { color: var(--faint); font-size: 11px; margin-top: 10px; }

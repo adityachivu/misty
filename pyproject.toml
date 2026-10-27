@@ -1,0 +1,44 @@
+[project]
+name = "misty-workspace"
+version = "0.1.0"
+description = "Misty: a personal task companion built around the cognitive and somatic barriers to getting things done."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = ["misty-core", "misty-store", "misty-server"]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*", "apps/server"]
+
+[tool.uv.sources]
+misty-core = { workspace = true }
+misty-store = { workspace = true }
+misty-server = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "hypothesis>=6",
+    "ruff>=0.8",
+    "ty>=0.0.92",
+    "httpx>=0.28.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["packages", "apps/server"]
+addopts = ["--import-mode=importlib"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["misty_core", "misty_store", "misty_server"]
+
+[tool.ty.environment]
+python-version = "3.14"

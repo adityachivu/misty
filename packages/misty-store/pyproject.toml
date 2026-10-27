@@ -1,0 +1,13 @@
+[project]
+name = "misty-store"
+version = "0.1.0"
+description = "SQLite storage for Misty: the append-only edit log and the rebuildable tasks projection."
+requires-python = ">=3.14"
+dependencies = ["misty-core"]
+
+[tool.uv.sources]
+misty-core = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
