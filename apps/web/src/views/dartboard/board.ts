@@ -9,9 +9,14 @@
 // task file. Here every gesture is a validated, recorded Misty edit, so it lands
 // immediately. Edits are still one click from undone: the yellow halo now means
 // "changed this session", and ↺ / reset all record `undo_edit`s for those edits.
+//
+// Reorganising (drag a subtask onto another to merge them, click an open subtask's
+// empty space to pop it, Collapse to bring pops back) is a draft, not a stream of
+// edits: see reorg.ts and ADR 0003.
 import "./board.css";
 import { CommandRejected, type Edit, type Task } from "../../api";
 import type { ViewContext } from "../types";
+import * as R from "./reorg";
 
 export const DARTBOARD_TOOLS = [
   "create_task",
@@ -52,9 +57,11 @@ const CATEGORIES = ["work", "uni", "projects", "admin"] as const;
 const QUAD: Record<string, number> = { uni: -135, work: -45, projects: 45, admin: 135 }; // wedge centres, degrees
 const JITTER = 78, HALF_WEDGE = 43;
 
-const MAX_DEPTH = 2; // root → subtask → sub-subtask
+// Sizes are given for three levels; anything deeper is drawn at the last one. Depth
+// itself is unlimited: the database has no cap, and a cap here hid deeper tasks.
+const SIZE_LEVELS = 2;
 
-// Diameters by depth (index = depth). One click expands straight to `open`.
+// Diameters by depth (index = depth, clamped). One click expands straight to `open`.
 const D_IDLE = [96, 60, 44];
 const D_OPEN = [340, 230, 165]; // floor for an open bubble with nothing inside
 const D_DONE = [44, 30, 24];
@@ -83,6 +90,8 @@ interface BNode {
   zap: boolean;
   done: boolean;
   pending: boolean; // changed this session, here or below
+  synthetic: boolean; // made by the draft (a merge); not in the database yet
+  drafted: boolean; // the draft moves or creates it
   chain: string[]; // ids root-first, ending with this one
   children: BNode[];
 }
@@ -124,6 +133,9 @@ const TEMPLATE = `
   <header id="hud"></header>
   <div id="toolbar">
     <div class="tool-row">
+      <button id="collapseBtn" class="tool-btn" title="close everything and bring back popped groups whose parts are untouched" hidden>collapse</button>
+      <button id="discardDraftBtn" class="tool-btn" title="throw away this reorganisation" hidden>✕ discard</button>
+      <button id="applyBtn" class="tool-btn" title="apply this reorganisation now" hidden>✓ apply now</button>
       <button id="addBtn" class="tool-btn" title="add a task">+ add</button>
       <button id="resetBtn" class="tool-btn" title="undo every change made this session" hidden>↺ reset all</button>
     </div>
@@ -208,6 +220,9 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   let focusPath: string[] = [];
   let datePickFor: string | null = null;
   const gfx = new Map<string, Elems>();
+  let tasksCache: Task[] = []; // the database, as last read
+  let reorg = R.emptyReorg(); // the draft laid over it
+  const baseMap = () => new Map(tasksCache.map(t => [t.id, t]));
   let today = new Date(), tomorrow = today, nextSat = today, monthOut = today;
 
   const session: { id: string; staged: Staged[] } = (() => {
@@ -240,7 +255,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
 
   const tail = () => focusPath[focusPath.length - 1] ?? null;
   const stateOf = (n: BNode) => (focusPath.includes(n.id) ? "open" : "idle");
-  const canDecompose = (n: BNode) => n.depth < MAX_DEPTH;
+  const canDecompose = (n: BNode) => !n.synthetic;
   const subtreeIds = (n: BNode): string[] => [n.id, ...n.children.flatMap(subtreeIds)];
   const walk = (n: BNode, id: string): BNode | null =>
     n.id === id ? n : n.children.reduce<BNode | null>((a, c) => a ?? walk(c, id), null);
@@ -272,9 +287,10 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
         section: typeof a.section === "string" ? a.section : "",
         date, dateType: date ? (a.date_kind === "scheduled" ? "scheduled" : "due") : null,
         zap: a.quick === true, done: t.state === "done", pending: false,
+        synthetic: R.isNew(t.id), drafted: reorg.nodes.has(t.id),
         chain: [...parentChain, t.id], children: [],
       };
-      if (depth < MAX_DEPTH) {
+      if (!parentChain.includes(t.id)) {
         node.children = (byParent.get(t.id) ?? []).filter(kidVisible)
           .map(k => makeNode(k, depth + 1, node.chain));
       }
@@ -320,7 +336,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
 
   // An open bubble must fit its (possibly open) children, so size resolves bottom-up.
   function diamOf(n: BNode): number {
-    const d = Math.min(n.depth, MAX_DEPTH);
+    const d = Math.min(n.depth, SIZE_LEVELS);
     if (stateOf(n) === "idle") return n.done ? D_DONE[d] : D_IDLE[d];
     // area-based pack: √(Σ kid areas) is the side of the square they'd tile;
     // ×1.7 is slack for flex-wrap gaps and the circle's unusable corners.
@@ -472,7 +488,9 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   // ─── bubbles ─────────────────────────────────────────────────────────────────
   // Date ops are root-only: a subtask has no band (it lives inside its parent), so
   // a date set on one would be a change the board couldn't show you.
+  // A merged group isn't a task yet, so it has no simple edits until the draft lands.
   const opVisible = (n: BNode, op: (typeof OPS)[number]) =>
+    !n.synthetic &&
     (!op.rootOnly || n.depth === 0) &&
     (op.op !== "breakdown" || canDecompose(n)) &&
     (op.op !== "undo" || n.pending);
@@ -487,8 +505,20 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       b.addEventListener("click", ev => { ev.stopPropagation(); onOp(cur(), op); });
       b.addEventListener("mousedown", ev => ev.stopPropagation());
     }
-    e.g.addEventListener("click", ev => { ev.stopPropagation(); onBubbleClick(cur()); });
+    e.g.addEventListener("click", ev => {
+      ev.stopPropagation();
+      if (suppressClick) return; // the click that ends a drag
+      onBubbleClick(cur());
+    });
     e.g.addEventListener("mousedown", ev => ev.stopPropagation()); // never starts a pan
+    // Subtasks drag; roots don't (their place is their date and category).
+    if (node.depth > 0) {
+      e.g.addEventListener("pointerdown", ev => {
+        if (ev.button !== 0 || (ev.target as Element).closest("button, input")) return;
+        ev.stopPropagation();
+        drag = { id: node.id, el: e.g, x0: ev.clientX, y0: ev.clientY, started: false };
+      });
+    }
     e.input.addEventListener("keydown", ev => {
       ev.stopPropagation();
       if (ev.key === "Enter" && e.input.value.trim()) { addChild(cur(), e.input.value.trim()); e.input.value = ""; }
@@ -523,6 +553,8 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   // One click opens; clicking the open bubble again closes it.
   function onBubbleClick(n: BNode) {
     datePickFor = null;
+    // The empty space of an open subtask with subtasks of its own pops that level.
+    if (focusPath.includes(n.id) && n.depth > 0 && n.children.length) return doReorg(R.pop(baseMap(), reorg, n.id));
     if (tail() === n.id) return stepOut();
     const i = focusPath.indexOf(n.id);
     if (i !== -1) focusPath = focusPath.slice(0, i + 1); // an ancestor: close what's inside it
@@ -533,7 +565,298 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   /** Out one level — an open subtask leaves you in its parent, not on the board. */
   function stepOut() { focusPath = focusPath.slice(0, -1); datePickFor = null; sync(); }
   function clearFocus() { focusPath = []; datePickFor = null; sync(); }
-  function sync() { layout(); render(); kick(); }
+  function sync() { layout(); render(); kick(); syncHold(); }
+
+  // ─── reorganising (a draft; see reorg.ts) ────────────────────────────────────
+  const VOCABULARY =
+    "Dartboard bubbles. Each bubble is a task; a bubble inside another is its subtask. " +
+    "merge {dragged, target, group}: a new task `group`, titled 'target + dragged', takes " +
+    "target's place, and both go inside it. insert {dragged, into}: dragged becomes a subtask " +
+    "of `into`. to_root {dragged}: dragged becomes a top-level task in its old root's " +
+    "category and section. pop {group}: the group dissolves, its subtasks take its place, and " +
+    "the group task is discarded. collapse {restored}: popped groups whose parts were untouched " +
+    "come back. Bubbles only move within the root task they are under, or out to the top level.";
+  const SETTLE_MS = 6000; // quiet time after the board is closed before the draft applies
+  const HOLD_MS = 15000; // lease while a bubble is open or dragged, renewed every few seconds
+  const DRAFT_KEY = "misty.dartboard.draft";
+
+  let draftId: string | null = (() => { try { return sessionStorage.getItem(DRAFT_KEY); } catch { return null; } })();
+  let draftDue: number | null = null; // performance.now() when it should settle, if released
+  let draftBusy = false; // applying / finishing
+  let syncChain: Promise<unknown> = Promise.resolve();
+  let held = false;
+
+  const setDraftId = (id: string | null) => {
+    draftId = id;
+    try { if (id) sessionStorage.setItem(DRAFT_KEY, id); else sessionStorage.removeItem(DRAFT_KEY); } catch { /* private mode */ }
+  };
+  const isHeld = () => focusPath.length > 0 || !!drag?.started;
+  const queue = (fn: () => Promise<unknown>) => {
+    syncChain = syncChain.then(fn).catch(e => flash(e instanceof CommandRejected ? e.message : String(e)));
+    return syncChain;
+  };
+
+  /** Apply a reorganisation locally, then tell the server. */
+  function doReorg(res: R.Result, from?: Map<string, DOMRect>) {
+    reorg = res.reorg;
+    const op = res.op;
+    // A moved or merged bubble closes, along with what's inside it. A popped level
+    // leaves the chain, and whatever was open inside it stays open.
+    if (op.op === "pop") focusPath = focusPath.filter(id => id !== op.group);
+    else if (op.op === "merge" || op.op === "insert" || op.op === "to_root") {
+      const cut = focusPath.findIndex(id => id === op.dragged || (op.op === "merge" && id === op.target));
+      if (cut !== -1) focusPath = focusPath.slice(0, cut);
+    }
+    rebuildFromDraft(from);
+    const after = R.toStructure(reorg), noop = R.isNoop(reorg);
+    draftDue = isHeld() ? null : performance.now() + SETTLE_MS;
+    queue(async () => {
+      if (noop) { // it cancelled out: nothing to apply
+        if (draftId) { const id = draftId; setDraftId(null); await ctx.drafts.discard(id).catch(() => {}); }
+        draftDue = null;
+        drawHud();
+        return;
+      }
+      if (!draftId) setDraftId((await ctx.drafts.create(VOCABULARY, { settleMs: SETTLE_MS })).id);
+      await ctx.drafts.update(draftId!, { append_ops: [op], after, hold_ms: isHeld() ? HOLD_MS : SETTLE_MS });
+    });
+  }
+
+  function rebuildFromDraft(from?: Map<string, DOMRect>) {
+    stampClock();
+    const before = snapshot(from);
+    build(R.effectiveTasks(tasksCache, reorg));
+    layout(); render(before); kick(); syncHold();
+  }
+
+  /** Hold the draft while the user is working in a bubble; release it when they leave. */
+  function syncHold() {
+    const now = isHeld();
+    if (now === held) return;
+    held = now;
+    draftDue = held || !draftId ? null : performance.now() + SETTLE_MS;
+    if (draftId) { const id = draftId; queue(() => ctx.drafts.update(id, { hold_ms: held ? HOLD_MS : SETTLE_MS })); }
+  }
+
+  function collapseAll() {
+    const res = R.collapse(baseMap(), reorg);
+    focusPath = [];
+    datePickFor = null;
+    if (res.restored.length) doReorg(res);
+    else { reorg = res.reorg; rebuildFromDraft(); }
+  }
+
+  /** Server says the draft is done (or the user forced it): drop the overlay, reload. */
+  async function finishDraft(draft: { status: string; error: string | null }, edits: Edit[]) {
+    setDraftId(null);
+    draftDue = null;
+    reorg = R.emptyReorg();
+    if (draft.status === "applied") {
+      for (const e of edits) session.staged.push({ seq: e.seq, type: e.type, targets: e.targets });
+      saveSession();
+      if (edits.length) flash(`reorganisation applied · ${edits.length} edit${edits.length === 1 ? "" : "s"} · ↺ undoes`, "info");
+    } else if (draft.status === "rejected") {
+      flash(`reorganisation not applied: ${draft.error}`);
+    }
+    await refresh();
+  }
+
+  async function pollDraft() {
+    if (!draftId || draftBusy) return drawHud();
+    draftBusy = true;
+    try {
+      const { draft, edits } = await ctx.drafts.get(draftId);
+      if (draft.status !== "open") await finishDraft(draft, edits);
+    } catch { /* server away: try again next tick */ } finally {
+      draftBusy = false;
+      drawHud();
+    }
+  }
+  const pollTimer = setInterval(() => {
+    void pollDraft();
+    if (held && draftId) { const id = draftId; queue(() => ctx.drafts.update(id, { hold_ms: HOLD_MS })); }
+  }, 1000);
+
+  async function applyNow() {
+    if (!draftId) return;
+    const id = draftId;
+    await syncChain;
+    draftBusy = true;
+    try {
+      const { draft, edits } = await ctx.drafts.apply(id);
+      await finishDraft(draft, edits);
+    } catch (e) { flash(String(e)); } finally { draftBusy = false; }
+  }
+  async function discardDraft() {
+    const id = draftId;
+    await syncChain;
+    if (id) await ctx.drafts.discard(id).catch(() => {});
+    await finishDraft({ status: "discarded", error: null }, []);
+  }
+
+  // ─── dragging ────────────────────────────────────────────────────────────────
+  // Regions are fixed at the start of the drag, and the first one under the pointer
+  // wins: closed bubbles (merge), then open areas innermost first (join), then other
+  // roots (refused). Anywhere else, the bubble becomes a root task.
+  type Region = { kind: "merge" | "area" | "block"; id: string; el: HTMLElement; cx: number; cy: number; r: number };
+  let drag: {
+    id: string; el: HTMLElement; x0: number; y0: number; started: boolean;
+    float?: HTMLElement; regions?: Region[]; hit?: Region | null;
+  } | null = null;
+  let suppressClick = false;
+
+  function regionsFor(id: string): Region[] {
+    const t = new R.Tree(baseMap(), reorg);
+    const x = findNode(id)!;
+    const own = new Set(subtreeIds(x));
+    const circle = (kind: Region["kind"], nid: string, el: HTMLElement, pad = 0): Region => {
+      const b = el.getBoundingClientRect();
+      return { kind, id: nid, el, cx: b.left + b.width / 2, cy: b.top + b.height / 2, r: b.width / 2 + pad };
+    };
+    const merges: Region[] = [], areas: Region[] = [], blocks: Region[] = [];
+    for (const [nid, e] of gfx) {
+      if (own.has(nid) || !e.g.isConnected) continue;
+      const n = findNode(nid);
+      if (!n) continue;
+      if (n.depth === 0 && n.chain[0] !== x.chain[0]) blocks.push(circle("block", nid, e.g));
+      else if (!focusPath.includes(nid) && n.depth > 0 && R.canJoin(t, id, nid)) merges.push(circle("merge", nid, e.g, 4));
+    }
+    for (const nid of [...focusPath].reverse()) {
+      const e = gfx.get(nid);
+      if (e?.g.isConnected && !own.has(nid)) areas.push(circle("area", nid, e.g));
+    }
+    return [...merges, ...areas, ...blocks];
+  }
+
+  window.addEventListener("pointermove", ev => {
+    if (!drag) return;
+    if (!drag.started) {
+      if (Math.hypot(ev.clientX - drag.x0, ev.clientY - drag.y0) < 4) return;
+      drag.started = true;
+      // Regions are measured once, so measure where bubbles land, not mid-animation.
+      for (const anim of container.getAnimations({ subtree: true })) anim.finish();
+      drag.regions = regionsFor(drag.id);
+      const b = drag.el.getBoundingClientRect();
+      const f = drag.el.cloneNode(true) as HTMLElement;
+      f.classList.add("drag-float");
+      f.style.width = `${b.width / cam.z}px`;
+      f.style.height = `${b.height / cam.z}px`;
+      f.style.setProperty("--z", String(cam.z));
+      container.appendChild(f);
+      drag.float = f;
+      drag.el.classList.add("is-drag-src");
+      viewport.classList.add("is-dragging");
+      syncHold();
+    }
+    const f = drag.float!;
+    f.style.left = `${ev.clientX}px`;
+    f.style.top = `${ev.clientY}px`;
+    const hit = drag.regions!.find(r => Math.hypot(ev.clientX - r.cx, ev.clientY - r.cy) <= r.r) ?? null;
+    if (hit !== drag.hit) {
+      drag.hit?.el.classList.remove("is-drop-target", "is-drop-area", "is-drop-blocked");
+      hit?.el.classList.add(hit.kind === "merge" ? "is-drop-target" : hit.kind === "area" ? "is-drop-area" : "is-drop-blocked");
+      drag.hit = hit;
+    }
+  }, on);
+
+  window.addEventListener("pointerup", () => {
+    const d = drag;
+    drag = null;
+    if (!d?.started) return;
+    suppressClick = true;
+    setTimeout(() => { suppressClick = false; }, 0);
+    d.hit?.el.classList.remove("is-drop-target", "is-drop-area", "is-drop-blocked");
+    viewport.classList.remove("is-dragging");
+    const fromRect = d.float!.getBoundingClientRect();
+    d.float!.remove();
+    d.el.classList.remove("is-drag-src");
+    const from = new Map([[d.id, fromRect]]);
+    const t = new R.Tree(baseMap(), reorg);
+    const hit = d.hit;
+    if (hit?.kind === "merge") return doReorg(R.merge(baseMap(), reorg, d.id, hit.id), from);
+    if (hit?.kind === "area") {
+      if (t.parentOf(d.id) === hit.id) return rebuildFromDraft(from); // stayed put
+      return doReorg(R.insert(baseMap(), reorg, d.id, hit.id), from);
+    }
+    if (hit?.kind === "block") {
+      flash("bubbles only merge within the same root task");
+      return rebuildFromDraft(from);
+    }
+    doReorg(R.toRoot(baseMap(), reorg, d.id), from);
+  }, on);
+
+  // ─── motion ──────────────────────────────────────────────────────────────────
+  // Subtask elements are rebuilt on every render, so motion is FLIP: remember where
+  // each bubble was (by task id), render, then animate every bubble from its old place
+  // to its new one. New bubbles fly out of their parent's centre; vanished ones are
+  // drawn once more as a ghost that shrinks into whatever now holds them, or, when
+  // they no longer exist (a pop), expands and fades.
+  const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const SPRING = "cubic-bezier(.34,1.45,.64,1)"; // back-out
+  type Snap = Map<string, { el: HTMLElement; rect: DOMRect }>;
+
+  function snapshot(override?: Map<string, DOMRect>): Snap {
+    const out: Snap = new Map();
+    for (const el of bubbles.querySelectorAll<HTMLElement>(".bubble[data-id]")) {
+      out.set(el.dataset.id!, { el, rect: override?.get(el.dataset.id!) ?? el.getBoundingClientRect() });
+    }
+    return out;
+  }
+  const centre = (r: DOMRect) => ({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  const parentId = (el: HTMLElement) => el.parentElement?.closest<HTMLElement>(".bubble[data-id]")?.dataset.id;
+
+  function flip(before: Snap) {
+    if (REDUCED || !booted) return;
+    const after = snapshot();
+    for (const [id, { el, rect }] of after) {
+      if (!el.classList.contains("kid")) continue;
+      const pid = parentId(el);
+      const now = centre(rect);
+      const pNow = pid ? after.get(pid) : undefined;
+      const old = before.get(id);
+      if (old) {
+        // relative to the parent, so a kid doesn't also replay its parent's motion
+        const o = centre(old.rect), pOld = pid ? before.get(pid) : undefined;
+        const ref = pOld && pNow ? { x: centre(pOld.rect).x - centre(pNow.rect).x, y: centre(pOld.rect).y - centre(pNow.rect).y } : { x: 0, y: 0 };
+        const dx = (o.x - now.x - ref.x) / cam.z, dy = (o.y - now.y - ref.y) / cam.z;
+        const sc = old.rect.width / (rect.width || 1);
+        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sc - 1) < 0.01) continue;
+        el.animate([{ transform: `translate(${dx}px,${dy}px) scale(${sc})` }, { transform: "none" }],
+          { duration: 480, easing: SPRING });
+      } else if (pNow) {
+        const p = centre(pNow.rect);
+        el.animate([
+          { transform: `translate(${(p.x - now.x) / cam.z}px,${(p.y - now.y) / cam.z}px) scale(.15)`, opacity: 0 },
+          { transform: "none", opacity: 1 },
+        ], { duration: 520, easing: SPRING });
+      }
+    }
+    for (const [id, old] of before) {
+      if (after.has(id) || !old.el.classList.contains("kid")) continue;
+      const pid = parentId(old.el);
+      if (pid && before.has(pid) && !after.has(pid)) continue; // its parent's ghost carries it
+      const n = findNode(id);
+      // the nearest ancestor still on screen is where it went
+      const dest = n ? [...n.chain].reverse().map(a => after.get(a)).find(Boolean) : undefined;
+      ghost(old.el, old.rect, dest ? centre(dest.rect) : null);
+    }
+  }
+
+  function ghost(src: HTMLElement, rect: DOMRect, into: { x: number; y: number } | null) {
+    const g = src.cloneNode(true) as HTMLElement;
+    g.classList.add("ghost");
+    const vp = camera.getBoundingClientRect();
+    g.style.left = `${(rect.left - vp.left) / cam.z}px`;
+    g.style.top = `${(rect.top - vp.top) / cam.z}px`;
+    g.style.width = g.style.height = `${rect.width / cam.z}px`;
+    camera.appendChild(g);
+    const c = centre(rect);
+    const end = into
+      ? { transform: `translate(${(into.x - c.x) / cam.z}px,${(into.y - c.y) / cam.z}px) scale(.15)`, opacity: 0 }
+      : { transform: "scale(1.3)", opacity: 0 }; // a pop: the level bursts
+    g.animate([{ transform: "none", opacity: 1 }, end], { duration: into ? 420 : 480, easing: "cubic-bezier(.33,1,.68,1)" })
+      .finished.then(() => g.remove(), () => g.remove());
+  }
 
   // ─── writing ─────────────────────────────────────────────────────────────────
   async function run(tool: Exclude<DartboardTool, "undo_edit">, args: Record<string, unknown>) {
@@ -596,9 +919,10 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     return run("create_task", { title: text, parent_id: n.id });
   }
 
-  function flash(msg: string) {
+  function flash(msg: string, kind: "error" | "info" = "error") {
     const f = $("flash");
     f.textContent = msg; f.hidden = false;
+    f.classList.toggle("is-info", kind === "info");
     clearTimeout(flashTimer);
     flashTimer = setTimeout(() => { f.hidden = true; }, 4000);
   }
@@ -606,12 +930,14 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
 
   // ─── rendering ───────────────────────────────────────────────────────────────
   // full DOM refresh — cheap at this size, and only on state change (not per frame)
-  function render() {
+  function render(before: Snap = snapshot()) {
+    if (drag?.started) return; // a render would destroy the bubble being dragged
     if (nodes.map(n => n.id).join() !== builtIds) buildBubbles();
     for (const n of nodes) paintBubble(n, gfx.get(n.id));
     drawHud();
     paintToolbar();
     restoreCaret();
+    flip(before);
   }
 
   const dateLabel = (n: BNode) => `${n.dateType === "scheduled" ? "⏳" : "📅"} ${n.date ? short(n.date) : "—"}`;
@@ -621,9 +947,11 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     const st = stateOf(n);
     const isRoot = n.depth === 0;
     const band = isRoot ? (n as Root).band : null;
-    e.g.className = `bubble${isRoot ? "" : " kid is-d" + Math.min(n.depth, MAX_DEPTH)}` +
+    e.g.className = `bubble${isRoot ? "" : " kid is-d" + Math.min(n.depth, SIZE_LEVELS)}` +
       `${n.children.length ? " has-kids" : ""}${band === "overdue" ? " is-overdue" : ""}` +
-      `${st !== "idle" ? " is-" + st : ""}${n.pending ? " is-pending" : ""}${n.done ? " is-done" : ""}`;
+      `${st !== "idle" ? " is-" + st : ""}${n.pending ? " is-pending" : ""}${n.done ? " is-done" : ""}` +
+      `${n.drafted ? " is-drafted" : ""}${n.synthetic ? " is-synthetic" : ""}`;
+    e.g.dataset.id = n.id;
     e.text.textContent = n.text;
     e.zap.style.display = n.zap ? "block" : "none";
     e.meta.style.display = st === "idle" ? "none" : "block";
@@ -684,7 +1012,16 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     hud.append(el("div", "count", `${nodes.length} root tasks · ${fmt(today)}`));
     hud.append(el("div", "bands", (Object.keys(BAND) as Band[]).filter(b => counts[b]).map(b => `${BAND_LBL[b]} ${counts[b]}`).join(" · ")));
     if (changed) hud.append(el("div", "pending", `${changed} change${changed === 1 ? "" : "s"} this session · ↺ undoes`));
+    if (draftId || !R.isNoop(reorg)) {
+      const left = draftDue === null ? null : Math.max(0, Math.ceil((draftDue - performance.now()) / 1000));
+      hud.append(el("div", "draft", held || left === null
+        ? "reorganising · applies once you close the bubble"
+        : left > 0 ? `reorganised · applies in ${left}s` : "reorganised · applying…"));
+    }
+    const pops = reorg.memory.filter(m => !m.forgotten).length;
+    if (pops) hud.append(el("div", "draft", `${pops} popped · collapse brings back ${R.wouldRestore(baseMap(), reorg).size}`));
     hud.append(el("div", "keys", "click to open · click a subtask to go deeper · esc backs out · scroll to zoom · 0 to fit"));
+    hud.append(el("div", "keys", "drag a subtask onto another to merge · click an open subtask's space to pop it"));
   }
 
   // ─── toolbar — add task / reset all ──────────────────────────────────────────
@@ -694,6 +1031,11 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   const addPanel = $("addPanel"), catRow = $("catRow");
   const sectionInput = $<HTMLInputElement>("sectionInput"), textInput = $<HTMLInputElement>("textInput");
   const sectionOptions = $("sectionOptions");
+  const collapseBtn = $<HTMLButtonElement>("collapseBtn");
+  const applyBtn = $<HTMLButtonElement>("applyBtn"), discardDraftBtn = $<HTMLButtonElement>("discardDraftBtn");
+  collapseBtn.addEventListener("click", collapseAll, on);
+  applyBtn.addEventListener("click", () => void applyNow(), on);
+  discardDraftBtn.addEventListener("click", () => void discardDraft(), on);
   let addTaskOpen = false, resetConfirming = false;
   let selectedCategory: string = CATEGORIES[0];
   let resetTimer: ReturnType<typeof setTimeout> | undefined;
@@ -765,6 +1107,11 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     resetBtn.hidden = session.staged.length === 0 && !resetConfirming;
     resetBtn.textContent = resetConfirming ? "confirm reset?" : "↺ reset all";
     resetBtn.classList.toggle("is-confirming", resetConfirming);
+    const restorable = R.wouldRestore(baseMap(), reorg).size;
+    collapseBtn.hidden = !restorable;
+    collapseBtn.textContent = `collapse · restore ${restorable}`;
+    const drafting = !!draftId || !R.isNoop(reorg);
+    applyBtn.hidden = discardDraftBtn.hidden = !drafting;
   }
 
   // ─── loop ────────────────────────────────────────────────────────────────────
@@ -786,18 +1133,25 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   }
 
   async function refresh() {
-    stampClock();
-    build((await ctx.tasks()).tasks);
-    sync();
+    tasksCache = (await ctx.tasks()).tasks;
+    rebuildFromDraft();
   }
 
   // ─── boot ────────────────────────────────────────────────────────────────────
+  let booted = false;
   async function boot() {
     stampClock();
-    build((await ctx.tasks()).tasks);
+    tasksCache = (await ctx.tasks()).tasks;
+    // A draft still settling (e.g. across a reload) is laid back over the tasks.
+    const open = await ctx.drafts.open().catch(() => []);
+    const mine = open.find(d => d.id === draftId) ?? open.at(-1);
+    if (mine) { setDraftId(mine.id); reorg = R.fromStructure(mine.after); draftDue = performance.now() + SETTLE_MS; }
+    else setDraftId(null);
+    build(R.effectiveTasks(tasksCache, reorg));
     settleNow();
     drawChrome(); buildBubbles(); render(); paint(); fitCam();
     viewport.dataset.ready = "1";
+    booted = true;
   }
 
   boot().catch(e => {
@@ -814,6 +1168,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   w.__state = () => nodes.map(n => ({ ...summarise(n), band: n.band, category: n.category, dateType: n.dateType }));
   w.__focus = () => ({ path: [...focusPath] });
   w.__session = () => ({ id: session.id, staged: session.staged.map(s => ({ ...s })) });
+  w.__draft = () => ({ id: draftId, structure: R.toStructure(reorg), memory: reorg.memory.map(m => ({ ...m })) });
   w.__audit = () => nodes.filter(n => n.category && n.category in QUAD).filter(n => {
     const dx = n.x - CX, dy = n.y - CY, r = Math.hypot(dx, dy);
     let da = Math.atan2(dy, dx) - (QUAD[n.category!] * Math.PI) / 180;
@@ -827,6 +1182,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     if (raf) cancelAnimationFrame(raf);
     clearTimeout(flashTimer);
     clearTimeout(resetTimer);
+    clearInterval(pollTimer);
     container.replaceChildren();
     container.classList.remove("dartboard");
   };

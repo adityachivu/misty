@@ -62,6 +62,27 @@ Lifecycle is not a workflow: any state can move to any other. `released` means "
 on purpose" and is a legitimate outcome. `discarded` means "captured by mistake" and is
 hidden from views. Nothing is ever hard-deleted.
 
+## Reorganisations are drafts (ADR 0003)
+
+Simple edits go straight to `POST /api/commands`. Reorganisations (merge, pop, pull out)
+go into a **draft** in the `drafts` table, which is mutable working state and not part of
+the log. A client describes the draft in its own vocabulary (`vocabulary`, `ops`) and
+gives the structure it intends (`after`: each affected task's parent, new tasks as
+`new:<label>`, and the tasks it removes).
+
+```
+client ──PATCH /api/drafts/{id}──▶ drafts (open, settling)
+                                     │ quiet for settle_ms and no hold lease
+                                     ▼
+             translator: agent (POST …/apply with steps) or stand-in (structure.plan)
+                                     │ TaskService.execute_batch: one transaction
+                                     ▼ checked against `after`, else rolled back
+                    ordinary edits, correlation_id = draft id
+```
+
+The server applies settled drafts itself (a loop in `create_app`), so a closed tab never
+strands one.
+
 ## Processes (planned)
 
 - **`taskd`** (`apps/server`): the only process that serves the DB. `/mcp` (Streamable
@@ -71,4 +92,5 @@ hidden from views. Nothing is ever hard-deleted.
 - **web** (`apps/web`): each visualisation declares which edit types it may dispatch.
   Types are generated from FastAPI's OpenAPI.
 - **agent** (`apps/agent`): an MCP client of `taskd`, never touches SQLite. Suggested
-  edits awaiting approval would go in a separate `proposals` table, not the log.
+  edits awaiting approval live in `drafts`, not the log: the agent reads open drafts as
+  context, can rewrite them, and applies them with its own composed commands.

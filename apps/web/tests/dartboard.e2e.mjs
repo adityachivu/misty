@@ -53,6 +53,14 @@ await create("gemma 4 project", { category: "projects" });
 await create("pay rent", { category: "admin", section: "Home", date: "2026-07-14", date_kind: "due" });
 await create("plan exam prep", { category: "uni", date: "2026-07-16", date_kind: "due" });
 await create("captured by an agent");   // no category, no date
+// reorganising: reorg lab ─ abc-trio ─ ab-pair ─ alpha, bravo ; abc-trio ─ charlie ; lab ─ delta
+const lab = await create("reorg lab", { category: "projects", section: "Lab" });
+const trio = await create("abc-trio", {}, lab);
+const pair = await create("ab-pair", {}, trio);
+await create("alpha", {}, pair);
+await create("bravo", {}, pair);
+await create("charlie", {}, trio);
+await create("delta", {}, lab);
 
 // ── checks ───────────────────────────────────────────────────────────────────
 let fails = 0;
@@ -88,7 +96,7 @@ const shot = async name => SHOTS && page.screenshot({ path: join(SHOTS, `${name}
 const bands = Object.fromEntries((await state()).map(n => [n.text, n.band]));
 check("bands from date/date_kind", bands, {
   "understand evaluations": "today", "gemma 4 project": "rim", "pay rent": "overdue",
-  "plan exam prep": "tomorrow", "captured by an agent": "rim",
+  "plan exam prep": "tomorrow", "captured by an agent": "rim", "reorg lab": "rim",
 });
 check("every categorised bubble sits in its wedge and band", await page.evaluate(() => window.__audit()), []);
 await shot("1-boot");
@@ -178,6 +186,76 @@ check("...and discards the new root", (await dbTask("fix the tap")).state, "disc
 check("...nothing left to undo", (await page.evaluate(() => window.__session())).staged.length, 0);
 check("bubbles are back home", await until(async () => (await page.evaluate(() => window.__audit())).length === 0), true);
 await shot("5-after-reset");
+
+// ── reorganising: a draft, applied when it settles ───────────────────────────
+const centreOf = async loc => { await page.waitForTimeout(600); const b = await loc.boundingBox(); return { x: b.x + b.width / 2, y: b.y + b.height / 2 }; };
+// the empty band just inside an open bubble's top edge: no kid, text or control there
+const clickSpace = async loc => { const b = await loc.boundingBox(); await page.mouse.click(b.x + b.width / 2, b.y + b.height * 0.06); await page.waitForTimeout(700); };
+const dragTo = async (loc, to) => {
+  const from = await centreOf(loc);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  for (let i = 1; i <= 12; i++) await page.mouse.move(from.x + (to.x - from.x) * i / 12, from.y + (to.y - from.y) * i / 12);
+  await page.mouse.up();
+  await page.waitForTimeout(700); // let the bubbles settle before anything is measured
+};
+const parentTitle = async title => {
+  const all = await db(), t = all.find(x => x.title === title && x.state !== "discarded");
+  return t?.parent_id ? all.find(x => x.id === t.parent_id).title : null;
+};
+const seqBefore = (await edits()).at(-1).seq;
+
+await clickBubble(await rootBubble("reorg lab"));
+await clickBubble(kidBubble("abc-trio"));
+await clickBubble(kidBubble("ab-pair"));
+check("three levels open", (await page.evaluate(() => window.__focus())).path.length, 3);
+await clickSpace(kidBubble("ab-pair"));
+check("clicking an open subtask's space pops it", (await nodeOf("abc-trio")).children.map(c => c.text), ["alpha", "bravo", "charlie"]);
+await clickSpace(kidBubble("abc-trio"));
+check("...and again, one level at a time", (await nodeOf("reorg lab")).children.map(c => c.text).sort(), ["alpha", "bravo", "charlie", "delta"]);
+check("popping writes nothing yet", (await edits()).at(-1).seq, seqBefore);
+await shot("6-popped");
+
+await dragTo(kidBubble("charlie"), await centreOf(kidBubble("delta")));
+// tasks have no sibling order, so compare as sets
+check("dropping charlie on delta merges them into a new group", (await nodeOf("delta + charlie"))?.children.map(c => c.text).sort(), ["charlie", "delta"]);
+check("the draft is on the server", await until(async () => !!(await page.evaluate(() => window.__draft())).id), true);
+check("...and still nothing written", (await edits()).at(-1).seq, seqBefore);
+const draftId = (await page.evaluate(() => window.__draft())).id;
+await shot("7-merged");
+
+await page.click("#collapseBtn");
+await page.waitForTimeout(150);
+check("collapse closes everything", (await page.evaluate(() => window.__focus())).path, []);
+check("...and brings back ab-pair (its parts were untouched)", (await nodeOf("ab-pair"))?.children.map(c => c.text), ["alpha", "bravo"]);
+check("...but not abc-trio (charlie was merged)", await nodeOf("abc-trio"), null);
+
+const draftNow = async () => (await (await fetch(`${BASE}/api/drafts/${draftId}`)).json()).draft;
+check("collapse sent the final structure", (await until(async () => (await draftNow()).ops.at(-1)?.op === "collapse")) && true, true);
+check("the closed board settles and applies the draft",
+  await until(async () => (await (await fetch(`${BASE}/api/drafts/${draftId}`)).json()).draft.status === "applied", 15000), true);
+check("abc-trio is discarded", (await dbTask("abc-trio")).state, "discarded");
+check("ab-pair is back under the lab", await parentTitle("ab-pair"), "reorg lab");
+check("alpha stays in ab-pair", await parentTitle("alpha"), "ab-pair");
+check("the merge is a real task now", await parentTitle("delta + charlie"), "reorg lab");
+check("...holding delta and charlie", [await parentTitle("delta"), await parentTitle("charlie")], ["delta + charlie", "delta + charlie"]);
+const applied = (await edits()).filter(e => e.seq > seqBefore);
+// alpha and bravo end up where they started (in ab-pair), so they aren't moved at all
+check("only the net change was recorded (create, 3 moves, discard)", applied.map(e => e.type).sort(),
+  ["task.created", "task.discarded", "task.reparented", "task.reparented", "task.reparented"]);
+check("...all tagged with the draft", [...new Set(applied.map(e => e.correlation_id))], [draftId]);
+check("the board shows the database again", await until(async () => !(await page.evaluate(() => window.__draft())).id), true);
+
+// pulling a subtask out onto the empty board makes it a root, in the same wedge
+await clickBubble(await rootBubble("reorg lab"));
+await clickBubble(kidBubble("ab-pair"));
+await dragTo(kidBubble("alpha"), { x: 60, y: 940 });
+check("alpha is a root in the draft", (await state()).some(n => n.text === "alpha"), true);
+await page.click("#applyBtn");
+check("apply now writes it", await until(async () => (await dbTask("alpha")).parent_id === null), true);
+check("...keeping the lab's category and section", [(await dbTask("alpha")).attrs.category, (await dbTask("alpha")).attrs.section], ["projects", "Lab"]);
+check("ab-pair keeps its one remaining subtask (tasks don't dissolve)", await parentTitle("bravo"), "ab-pair");
+await shot("8-pulled-out");
 
 check("no page errors", pageErrors, []);
 await browser.close();

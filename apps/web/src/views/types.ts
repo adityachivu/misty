@@ -1,4 +1,4 @@
-import type { Edit, Task, Tool } from "../api";
+import type { DraftClient, Edit, Task, Tool } from "../api";
 
 /**
  * A visualisation of the task database. Views read every task, but may only
@@ -19,4 +19,9 @@ export interface ViewContext<T extends Tool = Tool> {
   tasks(): Promise<{ head_seq: number; tasks: Task[] }>;
   /** Run one of this view's affordances. Rejects with CommandRejected. */
   dispatch(tool: T, args: Record<string, unknown>, opts?: { correlationId?: string }): Promise<Edit>;
+  /**
+   * Reorganisations (ADR 0003): describe them in the view's own vocabulary and let a
+   * translator turn them into edits once they settle. Drafts are tagged with the view.
+   */
+  drafts: DraftClient;
 }

@@ -92,3 +92,58 @@ def test_import_dartboard(service):
     assert tasks["metrics"].attrs == {"quick": True}
     assert tasks["someday"].attrs["date_kind"] == "scheduled"
     assert service.verify() == []
+
+
+def test_draft_round_trip(service):
+    client = TestClient(create_app(service, settle_every=None))
+    root = command(client, "create_task", title="root").json()["edit"]["task_id"]
+    a = command(client, "create_task", title="a", parent_id=root).json()["edit"]["task_id"]
+    b = command(client, "create_task", title="b", parent_id=root).json()["edit"]["task_id"]
+
+    draft = client.post("/api/drafts", json={"client": "web:test", "vocabulary": "bubbles"}).json()[
+        "draft"
+    ]
+    after = {
+        "nodes": [
+            {"id": "new:g", "parent": root, "title": "b + a"},
+            {"id": b, "parent": "new:g"},
+            {"id": a, "parent": "new:g"},
+        ]
+    }
+    r = client.patch(
+        f"/api/drafts/{draft['id']}",
+        json={"append_ops": [{"op": "merge", "dragged": a, "target": b}], "after": after},
+    )
+    assert r.status_code == 200
+    assert [d["id"] for d in client.get("/api/drafts?status=open").json()] == [draft["id"]]
+
+    body = client.post(f"/api/drafts/{draft['id']}/apply").json()
+    assert body["draft"]["status"] == "applied"
+    assert [e["type"] for e in body["edits"]] == [
+        "task.created",
+        "task.reparented",
+        "task.reparented",
+    ]
+    assert {e["correlation_id"] for e in body["edits"]} == {draft["id"]}
+
+    r = client.patch(f"/api/drafts/{draft['id']}", json={"note": "late"})
+    assert r.status_code == 400
+
+
+def test_settle_loop_applies_drafts(service):
+    import time
+
+    with TestClient(create_app(service, settle_every=0.05)) as client:
+        root = command(client, "create_task", title="root").json()["edit"]["task_id"]
+        a = command(client, "create_task", title="a", parent_id=root).json()["edit"]["task_id"]
+        draft = client.post(
+            "/api/drafts", json={"client": "web:test", "vocabulary": "v", "settle_ms": 0}
+        ).json()["draft"]
+        client.patch(
+            f"/api/drafts/{draft['id']}", json={"after": {"nodes": [{"id": a, "parent": None}]}}
+        )
+        for _ in range(100):
+            if client.get(f"/api/drafts/{draft['id']}").json()["draft"]["status"] != "open":
+                break
+            time.sleep(0.02)
+        assert client.get(f"/api/drafts/{draft['id']}").json()["draft"]["status"] == "applied"

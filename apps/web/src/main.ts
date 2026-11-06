@@ -1,4 +1,4 @@
-import { getTasks, runCommand, type Tool } from "./api";
+import { draftClient, getTasks, runCommand, type Tool } from "./api";
 import type { View, ViewContext } from "./views/types";
 import { dartboard } from "./views/dartboard";
 
@@ -8,6 +8,7 @@ const VIEWS: View[] = [dartboard];
 function contextFor(view: View): ViewContext {
   return {
     tasks: getTasks,
+    drafts: draftClient(`web:${view.id}`),
     dispatch(tool: Tool, args, opts) {
       if (!view.affordances.includes(tool)) {
         return Promise.reject(new Error(`${view.id} has no ${tool} affordance`));

@@ -11,6 +11,12 @@ same path agent tools will use. Pick a view with `?view=<id>`.
   `category`, ring = `date`/`date_kind`, ⚡ = `quick`. Gestures are recorded edits,
   attributed to `web:dartboard` and tagged with a per-tab session id. The yellow halo
   means "changed this session". ↺ and reset all record `undo_edit`s.
+  Reorganising is a draft (ADR 0003, `reorg.ts`): drag a subtask onto another to merge
+  them into a new group task, into an open bubble to move it there, or onto empty board to
+  make it a root. Click an open subtask's empty space to pop it (its subtasks take its
+  place), and use Collapse to bring pops back. Nothing is written until the board has been
+  closed for 6s, then the server applies the draft as one batch (or press "apply now").
+  Merges stay within one root task. Depth is unlimited.
 
 ```sh
 npm run dev         # :5173, proxies /api to `uv run misty serve` on :4322
