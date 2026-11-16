@@ -32,3 +32,13 @@ just tail       # recent edits
 ```
 
 The database is disposable test data for now: `just fresh` any time (stop `just serve` first).
+
+Work happens on branches:
+
+```sh
+just branch my-change   # new branch off an up-to-date main
+just sync               # rebase onto the latest origin/main
+just ship               # just check, then push the branch
+just pr                 # open a pull request in the browser
+just done               # after merging: back to main, delete the branch
+```
