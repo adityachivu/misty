@@ -69,6 +69,17 @@ const CHROME = [172, 120, 74]; // vertical room an open bubble needs for its own
 
 const K_RADIAL = 0.03, K_CENTER = 0.06, K_ANG_SOFT = 0.004, K_ANG_HARD = 0.055;
 const K_COLLIDE = 0.35, DAMP = 0.85, KE_FLOOR = 0.02;
+// Cooling (as in d3-force). Every force is scaled by `alpha`, which decays towards 0, so
+// the board always comes to rest, even when a band holds more bubbles than fit. Without
+// it, band containment and collision fight forever and the board never stops jittering.
+// An interaction reheats it. Equilibria are unchanged: all forces scale together.
+const ALPHA_MIN = 0.004;
+const ALPHA_DECAY = 1 - Math.pow(ALPHA_MIN, 1 / 300); // ~5s from fully hot at 60fps
+const REHEAT = 0.6;
+// A travelling bubble keeps the board this warm until it is home (d3's alphaTarget), so a
+// long swim always finishes, but never for longer than TRAVEL_MS.
+const TRAVEL_HEAT = 0.3, TRAVEL_MS = 8000;
+const MAX_SPEED = 14; // px/frame: an opening bubble shoves neighbours, it doesn't fling them
 const ZOOM_MIN = 0.25, ZOOM_MAX = 4;
 
 // ─── dates (local — toISOString is UTC and rolls over at the wrong hour) ──────
@@ -101,6 +112,8 @@ interface Root extends BNode {
   homeRadius: number; homeAngle: number;
   r: number;
   x: number; y: number; vx: number; vy: number;
+  /** performance.now() until which it is swimming home (dropped, or its band changed). */
+  travelUntil: number;
 }
 
 /** An edit made from this board this session, so it can be undone. */
@@ -303,7 +316,9 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       const old = prev.get(t.id);
       const n = makeNode(t, 0, []) as Root;
       // positions carry over, so a changed band reads as the bubble swimming there
-      Object.assign(n, old ? { x: old.x, y: old.y, vx: old.vx, vy: old.vy } : { x: NaN, y: NaN, vx: 0, vy: 0 });
+      Object.assign(n, old
+        ? { x: old.x, y: old.y, vx: old.vx, vy: old.vy, band: old.band, travelUntil: old.travelUntil }
+        : { x: NaN, y: NaN, vx: 0, vy: 0, travelUntil: 0 });
       return n;
     });
     layout();
@@ -321,7 +336,9 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   /** Band, home and size for each root, from its date and the current focus. */
   function layout() {
     for (const n of nodes) {
-      n.band = bandOf(n);
+      const band = bandOf(n);
+      if (n.band && n.band !== band) n.travelUntil = performance.now() + TRAVEL_MS; // swims there
+      n.band = band;
       [n.r0, n.r1] = BAND[n.band];
       n.homeRadius = (n.r0 + n.r1) / 2;
       // An uncategorised task (e.g. captured by an agent) has no wedge: it lives
@@ -345,9 +362,14 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   }
 
   // ─── physics ─────────────────────────────────────────────────────────────────
-  function tick() {
+  /** One step at heat `alpha`. Returns the kinetic energy. */
+  function tick(alpha: number) {
     const halfWedge = (HALF_WEDGE * Math.PI) / 180;
+    // The open bubble is what you're reading: it holds still and the others make room.
+    // So does a bubble being dragged (it's under the pointer, not in the simulation).
+    const pinned = (n: Root) => stateOf(n) !== "idle" || drag?.id === n.id;
     for (const n of nodes) {
+      if (pinned(n)) continue;
       const dx = n.x - CX, dy = n.y - CY;
       const r = Math.hypot(dx, dy) || 0.001;
       const urx = dx / r, ury = dy / r;
@@ -356,12 +378,12 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       if (r < n.r0) dr = (n.r0 - r) * K_RADIAL;
       else if (r > n.r1) dr = (n.r1 - r) * K_RADIAL;
       else dr = (n.homeRadius - r) * K_CENTER * K_RADIAL;
-      n.vx += urx * dr; n.vy += ury * dr;
+      n.vx += urx * dr * alpha; n.vy += ury * dr * alpha;
       // angular: soft pull to the seeded angle, stiffening hard past the wedge edge
       let da = n.homeAngle - Math.atan2(dy, dx);
       while (da > Math.PI) da -= 2 * Math.PI;
       while (da < -Math.PI) da += 2 * Math.PI;
-      const k = Math.abs(da) > halfWedge ? K_ANG_HARD : K_ANG_SOFT;
+      const k = (Math.abs(da) > halfWedge ? K_ANG_HARD : K_ANG_SOFT) * alpha;
       n.vx += -ury * da * r * k; n.vy += urx * da * r * k;
     }
     for (let i = 0; i < nodes.length; i++) {
@@ -375,16 +397,24 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
           const t = frac(a.id + b.id) * Math.PI * 2;
           dx = Math.cos(t); dy = Math.sin(t); d = 0.01;
         }
-        const p = ((min - d) / d) * K_COLLIDE * 0.5;
-        // an expanded bubble holds its ground; neighbours do the moving
-        const wa = stateOf(a) === "idle" ? 1 : 0.15, wb = stateOf(b) === "idle" ? 1 : 0.15;
-        a.vx -= dx * p * wa; a.vy -= dy * p * wa;
-        b.vx += dx * p * wb; b.vy += dy * p * wb;
+        const p = ((min - d) / d) * K_COLLIDE * 0.5 * alpha;
+        // a travelling bubble that shoves a neighbour takes it along: the neighbour swims
+        // home too, under the same deadline (so the total stays bounded)
+        if (a.travelUntil > b.travelUntil && !pinned(b)) b.travelUntil = a.travelUntil;
+        else if (b.travelUntil > a.travelUntil && !pinned(a)) a.travelUntil = b.travelUntil;
+        const wa = pinned(a) ? 0 : 1, wb = pinned(b) ? 0 : 1;
+        // against a pinned bubble, the free one takes the whole correction
+        const share = wa + wb === 1 ? 2 : 1;
+        a.vx -= dx * p * wa * share; a.vy -= dy * p * wa * share;
+        b.vx += dx * p * wb * share; b.vy += dy * p * wb * share;
       }
     }
     let ke = 0;
     for (const n of nodes) {
+      if (pinned(n)) { n.vx = n.vy = 0; continue; }
       n.vx *= DAMP; n.vy *= DAMP;
+      const v = Math.hypot(n.vx, n.vy);
+      if (v > MAX_SPEED) { n.vx *= MAX_SPEED / v; n.vy *= MAX_SPEED / v; }
       n.x += n.vx; n.y += n.vy;
       ke += n.vx * n.vx + n.vy * n.vy;
     }
@@ -457,6 +487,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       chrome.appendChild(mk("circle", {
         cx: CX, cy: CY, r: (r0 + r1) / 2, fill: "none",
         class: band === "overdue" ? "lane lane-overdue" : `lane lane-${i % 2 ? "a" : "b"}`,
+        "data-band": band,
         "stroke-width": r1 - r0,
       }));
     });
@@ -511,14 +542,14 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       onBubbleClick(cur());
     });
     e.g.addEventListener("mousedown", ev => ev.stopPropagation()); // never starts a pan
-    // Subtasks drag; roots don't (their place is their date and category).
-    if (node.depth > 0) {
-      e.g.addEventListener("pointerdown", ev => {
-        if (ev.button !== 0 || (ev.target as Element).closest("button, input")) return;
-        ev.stopPropagation();
-        drag = { id: node.id, el: e.g, x0: ev.clientX, y0: ev.clientY, started: false };
-      });
-    }
+    // Subtasks drag to reorganise; a closed root drags to a ring to reschedule it.
+    e.g.addEventListener("pointerdown", ev => {
+      if (ev.button !== 0 || (ev.target as Element).closest("button, input")) return;
+      const n = cur();
+      if (n.depth === 0 && stateOf(n) !== "idle") return; // an open root is for reading
+      ev.stopPropagation();
+      drag = { id: n.id, el: e.g, x0: ev.clientX, y0: ev.clientY, started: false, root: n.depth === 0 };
+    });
     e.input.addEventListener("keydown", ev => {
       ev.stopPropagation();
       if (ev.key === "Enter" && e.input.value.trim()) { addChild(cur(), e.input.value.trim()); e.input.value = ""; }
@@ -563,8 +594,15 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   }
 
   /** Out one level — an open subtask leaves you in its parent, not on the board. */
-  function stepOut() { focusPath = focusPath.slice(0, -1); datePickFor = null; sync(); }
-  function clearFocus() { focusPath = []; datePickFor = null; sync(); }
+  function stepOut() { const was = focusPath[0]; focusPath = focusPath.slice(0, -1); datePickFor = null; sync(); if (was && !focusPath.length) sendHome(); }
+  function clearFocus() { const was = focusPath.length; focusPath = []; datePickFor = null; sync(); if (was) sendHome(); }
+  /** After an open bubble closes, the bubbles it pushed aside swim back. The overdue
+   *  band usually holds more bubbles than fit, so its cluster is left to settle. */
+  function sendHome() {
+    const until = performance.now() + TRAVEL_MS;
+    for (const n of nodes) if (n.band !== "overdue" && !isHome(n)) n.travelUntil = until;
+    kick();
+  }
   function sync() { layout(); render(); kick(); syncHold(); }
 
   // ─── reorganising (a draft; see reorg.ts) ────────────────────────────────────
@@ -644,6 +682,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     datePickFor = null;
     if (res.restored.length) doReorg(res);
     else { reorg = res.reorg; rebuildFromDraft(); }
+    sendHome();
   }
 
   /** Server says the draft is done (or the user forced it): drop the overlay, reload. */
@@ -700,7 +739,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   // roots (refused). Anywhere else, the bubble becomes a root task.
   type Region = { kind: "merge" | "area" | "block"; id: string; el: HTMLElement; cx: number; cy: number; r: number };
   let drag: {
-    id: string; el: HTMLElement; x0: number; y0: number; started: boolean;
+    id: string; el: HTMLElement; x0: number; y0: number; started: boolean; root: boolean;
     float?: HTMLElement; regions?: Region[]; hit?: Region | null;
   } | null = null;
   let suppressClick = false;
@@ -735,10 +774,11 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       drag.started = true;
       // Regions are measured once, so measure where bubbles land, not mid-animation.
       for (const anim of container.getAnimations({ subtree: true })) anim.finish();
-      drag.regions = regionsFor(drag.id);
+      drag.regions = drag.root ? [] : regionsFor(drag.id);
       const b = drag.el.getBoundingClientRect();
       const f = drag.el.cloneNode(true) as HTMLElement;
       f.classList.add("drag-float");
+      f.style.transform = ""; // a root's inline position; the float is placed by CSS
       f.style.width = `${b.width / cam.z}px`;
       f.style.height = `${b.height / cam.z}px`;
       f.style.setProperty("--z", String(cam.z));
@@ -751,6 +791,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     const f = drag.float!;
     f.style.left = `${ev.clientX}px`;
     f.style.top = `${ev.clientY}px`;
+    if (drag.root) showSchedule(ev.clientX, ev.clientY);
     const hit = drag.regions!.find(r => Math.hypot(ev.clientX - r.cx, ev.clientY - r.cy) <= r.r) ?? null;
     if (hit !== drag.hit) {
       drag.hit?.el.classList.remove("is-drop-target", "is-drop-area", "is-drop-blocked");
@@ -759,12 +800,19 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     }
   }, on);
 
-  window.addEventListener("pointerup", () => {
+  window.addEventListener("pointerup", ev => {
     const d = drag;
     drag = null;
     if (!d?.started) return;
     suppressClick = true;
     setTimeout(() => { suppressClick = false; }, 0);
+    if (d.root) {
+      d.float!.remove();
+      d.el.classList.remove("is-drag-src");
+      viewport.classList.remove("is-dragging");
+      showSchedule(null);
+      return void dropRoot(d.id, ev.clientX, ev.clientY);
+    }
     d.hit?.el.classList.remove("is-drop-target", "is-drop-area", "is-drop-blocked");
     viewport.classList.remove("is-dragging");
     const fromRect = d.float!.getBoundingClientRect();
@@ -784,6 +832,75 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     }
     doReorg(R.toRoot(baseMap(), reorg, d.id), from);
   }, on);
+
+  // ─── rescheduling by dragging a root to a ring ───────────────────────────────
+  // The ring under the pointer sets the date, as the ☀️ ➡️ 📅 ⏳ buttons do. Within the
+  // month ring, distance from the centre picks the day. The angle is ignored: the bubble
+  // swims back to its own wedge. The overdue ring would mean a date in the past, so it
+  // refuses, and dropping off the board cancels.
+  type Schedule =
+    | { band: Band; date: string; kind: "due" }
+    | { band: "rim"; pick: true }
+    | { band: "overdue" | null; refuse: string };
+
+  const toBoard = (clientX: number, clientY: number) => {
+    const c = camera.getBoundingClientRect();
+    return { x: (clientX - c.left) / cam.z, y: (clientY - c.top) / cam.z };
+  };
+
+  function scheduleAt(clientX: number, clientY: number): Schedule {
+    const p = toBoard(clientX, clientY);
+    const r = Math.hypot(p.x - CX, p.y - CY);
+    if (r > BAND.rim[1] + 40) return { band: null, refuse: "off the board · cancel" };
+    // the gaps between rings belong to the nearer ring
+    const dist = (b: Band) => (r < BAND[b][0] ? BAND[b][0] - r : r > BAND[b][1] ? r - BAND[b][1] : 0);
+    const band = (Object.keys(BAND) as Band[]).reduce((a, b) => (dist(b) < dist(a) ? b : a));
+    if (band === "overdue") return { band, refuse: "overdue · can't schedule in the past" };
+    if (band === "rim") return { band, pick: true };
+    if (band === "today") return { band, date: fmt(today), kind: "due" };
+    if (band === "tomorrow") return { band, date: fmt(tomorrow), kind: "due" };
+    if (band === "weekend") return { band, date: fmt(nextSat), kind: "due" };
+    // month: inner edge = the day after the weekend, outer edge = a month out
+    const [r0, r1] = BAND.month;
+    const f = Math.min(1, Math.max(0, (r - r0) / (r1 - r0)));
+    const first = addDays(nextSat, 1);
+    const span = Math.round((+monthOut - +first) / 86400000);
+    return { band, date: fmt(addDays(first, Math.round(f * span))), kind: "due" };
+  }
+
+  const scheduleLabel = (s: Schedule) =>
+    "refuse" in s ? s.refuse : "pick" in s ? "later · pick a date" : `${BAND_LBL[s.band]} · 📅 ${short(toDate(s.date))}`;
+
+  const dropHint = el("div", "drop-hint");
+  dropHint.hidden = true;
+  container.appendChild(dropHint);
+  function showSchedule(clientX: number | null, clientY = 0) {
+    const s = clientX === null ? null : scheduleAt(clientX, clientY);
+    for (const lane of chrome.querySelectorAll<SVGElement>(".lane")) {
+      lane.classList.toggle("is-hot", !!s && !("refuse" in s) && lane.dataset.band === s.band);
+    }
+    dropHint.hidden = !s;
+    if (!s || clientX === null) return;
+    dropHint.textContent = scheduleLabel(s);
+    dropHint.classList.toggle("is-refused", "refuse" in s);
+    dropHint.style.left = `${clientX + 18}px`;
+    dropHint.style.top = `${clientY + 18}px`;
+  }
+
+  async function dropRoot(id: string, clientX: number, clientY: number) {
+    const n = nodes.find(x => x.id === id);
+    if (!n) return;
+    const s = scheduleAt(clientX, clientY);
+    if (!("refuse" in s)) { // start swimming from where it was let go
+      const p = toBoard(clientX, clientY);
+      Object.assign(n, { x: p.x, y: p.y, vx: 0, vy: 0, travelUntil: performance.now() + TRAVEL_MS });
+      paint();
+    }
+    if ("refuse" in s) { if (s.band === "overdue") flash("can't schedule in the past"); return kick(); }
+    if ("pick" in s) { focusPath = [id]; datePickFor = id; return sync(); } // ⏳'s own picker
+    kick();
+    await setDate(n, s.date, s.kind);
+  }
 
   // ─── motion ──────────────────────────────────────────────────────────────────
   // Subtask elements are rebuilt on every render, so motion is FLIP: remember where
@@ -1021,7 +1138,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     const pops = reorg.memory.filter(m => !m.forgotten).length;
     if (pops) hud.append(el("div", "draft", `${pops} popped · collapse brings back ${R.wouldRestore(baseMap(), reorg).size}`));
     hud.append(el("div", "keys", "click to open · click a subtask to go deeper · esc backs out · scroll to zoom · 0 to fit"));
-    hud.append(el("div", "keys", "drag a subtask onto another to merge · click an open subtask's space to pop it"));
+    hud.append(el("div", "keys", "drag a bubble to a ring to reschedule · drag a subtask onto another to merge · click an open subtask's space to pop it"));
   }
 
   // ─── toolbar — add task / reset all ──────────────────────────────────────────
@@ -1118,17 +1235,36 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   // Boot settles synchronously; interaction animates. rAF delivers a variable number
   // of frames, so an animated boot would land differently every load and break the
   // spatial memory the board depends on.
+  // Boot cools more slowly than interaction, for a well-settled first layout; it is a
+  // fixed number of steps, so the same tasks always land in the same places.
   const MAX_SETTLE = 900;
+  const BOOT_DECAY = 1 - Math.pow(ALPHA_MIN, 1 / MAX_SETTLE);
+  let alpha = 0;
   function settleNow() {
-    let quiet = 0;
-    for (let i = 0; i < MAX_SETTLE; i++) if (tick() < KE_FLOOR && ++quiet > 20) break;
+    for (let a = 1; a > ALPHA_MIN; a *= 1 - BOOT_DECAY) tick(a);
   }
-  let raf: number | null = null, settled = 0;
-  function kick() { settled = 0; if (!raf) raf = requestAnimationFrame(loop); }
+  let raf: number | null = null;
+  let physFrames = 0; // frames since the last kick, for tests
+  function kick(heat = REHEAT) { alpha = Math.max(alpha, heat); physFrames = 0; if (!raf) raf = requestAnimationFrame(loop); }
+  /** Is it inside its band and (if it has a category) its wedge? */
+  function isHome(n: Root) {
+    const dx = n.x - CX, dy = n.y - CY, r = Math.hypot(dx, dy);
+    if (r < n.r0 - 6 || r > n.r1 + 6) return false;
+    if (!n.category || !(n.category in QUAD)) return true;
+    let da = Math.atan2(dy, dx) - (QUAD[n.category] * Math.PI) / 180;
+    while (da > Math.PI) da -= 2 * Math.PI;
+    while (da < -Math.PI) da += 2 * Math.PI;
+    return Math.abs(da) <= ((HALF_WEDGE + 4) * Math.PI) / 180;
+  }
   function loop() {
-    const ke = tick();
+    physFrames++;
+    const now = performance.now();
+    for (const n of nodes) if (n.travelUntil && (now > n.travelUntil || isHome(n))) n.travelUntil = 0;
+    const travelling = nodes.some(n => n.travelUntil);
+    const ke = tick(alpha);
+    alpha += ((travelling ? TRAVEL_HEAT : 0) - alpha) * ALPHA_DECAY;
     paint();
-    if (ke < KE_FLOOR && ++settled > 20) { raf = null; return; }
+    if (!travelling && alpha < ALPHA_MIN && ke < KE_FLOOR) { alpha = 0; raf = null; return; }
     raf = requestAnimationFrame(loop);
   }
 
@@ -1168,6 +1304,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   w.__state = () => nodes.map(n => ({ ...summarise(n), band: n.band, category: n.category, dateType: n.dateType }));
   w.__focus = () => ({ path: [...focusPath] });
   w.__session = () => ({ id: session.id, staged: session.staged.map(s => ({ ...s })) });
+  w.__physics = () => ({ running: raf !== null, frames: physFrames });
   w.__draft = () => ({ id: draftId, structure: R.toStructure(reorg), memory: reorg.memory.map(m => ({ ...m })) });
   w.__audit = () => nodes.filter(n => n.category && n.category in QUAD).filter(n => {
     const dx = n.x - CX, dy = n.y - CY, r = Math.hypot(dx, dy);

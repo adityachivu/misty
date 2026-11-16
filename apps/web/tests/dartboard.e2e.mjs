@@ -168,6 +168,39 @@ await page.keyboard.press("Enter");
 check("+ add creates a root with category/section", await until(async () => (await dbTask("fix the tap"))?.attrs.section === "Home"), true);
 check("...on the rim, in the admin wedge", await until(async () => (await nodeOf("fix the tap"))?.band === "rim"), true);
 
+// drag a root to a ring to reschedule it; it swims back to its own wedge
+const boardPoint = async (r, deg) => {
+  const c = await page.locator("#camera").boundingBox(), z = c.width / 1800, t = deg * Math.PI / 180;
+  return { x: c.x + (900 + Math.cos(t) * r) * z, y: c.y + (900 + Math.sin(t) * r) * z };
+};
+// grab a bubble only once the board is still, or the press can land on a neighbour
+const atRest = () => until(async () => !(await page.evaluate(() => window.__physics().running)), 8000);
+const dragRoot = async (label, to) => {
+  await atRest();
+  const b = await (await rootBubble(label)).boundingBox();
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  for (let i = 1; i <= 12; i++) await page.mouse.move(b.x + b.width / 2 + (to.x - b.x - b.width / 2) * i / 12, b.y + b.height / 2 + (to.y - b.y - b.height / 2) * i / 12);
+  const hint = await page.locator(".drop-hint").innerText();
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  return hint;
+};
+await page.keyboard.press("Escape");
+check("dragging shows the date it would get", await dragRoot("gemma 4 project", await boardPoint(200, -90)), "today · 📅 07-15");
+check("dropping on the today ring makes it due today", await until(async () => (await dbTask("gemma 4 project")).attrs.date === "2026-07-15"), true);
+check("...and it lands in the today band", await until(async () => (await nodeOf("gemma 4 project")).band === "today"), true);
+check("...back in its own wedge", await until(async () => (await page.evaluate(() => window.__audit())).length === 0, 8000), true);
+await dragRoot("gemma 4 project", await boardPoint(700, -90));
+check("the outer edge of the month ring is a month out", await until(async () => (await dbTask("gemma 4 project")).attrs.date === "2026-08-15"), true);
+const before = (await edits()).at(-1).seq;
+check("the overdue ring refuses", await dragRoot("gemma 4 project", await boardPoint(20, 0)), "overdue · can't schedule in the past");
+check("...writing nothing", (await edits()).at(-1).seq, before);
+await dragRoot("gemma 4 project", await boardPoint(760, -90));
+check("the rim opens ⏳'s date picker", await (await rootBubble("gemma 4 project")).locator("> .body > .datepick").isVisible(), true);
+await page.keyboard.press("Escape");
+await page.keyboard.press("Escape");
+
 // session changes survive a reload (sessionStorage), halo and all
 await page.reload();
 await page.waitForSelector("#viewport[data-ready]");
@@ -192,6 +225,7 @@ const centreOf = async loc => { await page.waitForTimeout(600); const b = await 
 // the empty band just inside an open bubble's top edge: no kid, text or control there
 const clickSpace = async loc => { const b = await loc.boundingBox(); await page.mouse.click(b.x + b.width / 2, b.y + b.height * 0.06); await page.waitForTimeout(700); };
 const dragTo = async (loc, to) => {
+  await atRest();
   const from = await centreOf(loc);
   await page.mouse.move(from.x, from.y);
   await page.mouse.down();

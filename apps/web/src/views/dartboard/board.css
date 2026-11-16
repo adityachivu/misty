@@ -236,3 +236,17 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .bubble.is-drop-target { transition: none; }
 }
+
+/* ── rescheduling: drag a root to a ring ──────────────────────────────────── */
+#bubbles > .bubble:not(.is-open) { touch-action: none; }
+.lane.is-hot { stroke: var(--accent); opacity: .16; }
+.drop-hint {
+  position: fixed; z-index: 45; pointer-events: none;
+  background: var(--dot); color: var(--fg); border: 1px solid var(--accent);
+  border-radius: 6px; padding: 4px 8px; font-size: 12px; white-space: nowrap;
+}
+.drop-hint[hidden] { display: none; }
+.drop-hint.is-refused { border-color: var(--red); color: var(--red); }
+/* A drag would otherwise select text across every bubble it passes. */
+#viewport .bubble { -webkit-user-select: none; user-select: none; }
+#viewport .bubble input { -webkit-user-select: text; user-select: text; }

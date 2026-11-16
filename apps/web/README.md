@@ -17,6 +17,11 @@ same path agent tools will use. Pick a view with `?view=<id>`.
   place), and use Collapse to bring pops back. Nothing is written until the board has been
   closed for 6s, then the server applies the draft as one batch (or press "apply now").
   Merges stay within one root task. Depth is unlimited.
+  Drag a closed root bubble onto a ring to reschedule it: today, tomorrow and weekend
+  match the buttons, distance across the month ring picks the day, and the rim opens ⏳'s
+  date picker. The overdue ring refuses. The bubble swims back to its own wedge.
+  Physics cools (d3-force style) so the board always comes to rest; a bubble that is
+  swimming home keeps it warm until it arrives, for at most 8s.
 
 ```sh
 npm run dev         # :5173, proxies /api to `uv run misty serve` on :4322
