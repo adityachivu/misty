@@ -23,6 +23,7 @@ Common tasks are in the `justfile` (`just` lists them):
 
 ```sh
 just setup      # uv sync + npm install
+just env        # which environment this machine runs, and its settings
 just fresh      # wipe data/misty.db and seed random test tasks (just fresh 40 for more)
 just serve      # build the web app, serve it + the API on http://127.0.0.1:4322
 just dev        # hot-reload UI on :5173; run `just api` alongside it
@@ -31,4 +32,41 @@ just verify     # replay the edit log, compare with the tasks table
 just tail       # recent edits
 ```
 
-The database is disposable test data for now: `just fresh` any time (stop `just serve` first).
+## Dev and prod
+
+| | dev | prod |
+|---|---|---|
+| where | the machine the code is written on | a different machine |
+| settings | [`config/dev.toml`](config/dev.toml) | [`config/prod.toml`](config/prod.toml) |
+| database | `data/misty.db`, throwaway: `just fresh` any time (stop `just serve` first) | `~/.local/share/misty/misty.db`, the real tasks |
+| `db reset`, `db seed` | allowed | refused |
+| updated by | editing the code | `just deploy` |
+
+A machine is dev unless it says otherwise. To make one prod, give it a
+`config/local.toml` (not committed; see
+[`config/local.example.toml`](config/local.example.toml)), which can also override any
+setting for that machine. `--env` / `MISTY_ENV`, `--db` / `MISTY_DB`, `--host` /
+`MISTY_HOST`, and `--port` / `MISTY_PORT` override the files for one run.
+
+Setting up the prod machine (needs `git`, `uv`, `just`, and Node):
+
+```sh
+git clone https://github.com/adityachivu/misty.git && cd misty
+echo 'env = "prod"' > config/local.toml
+just deploy     # builds, creates the database
+just serve
+```
+
+Updating it:
+
+```sh
+just deploy     # pull main, back up the database, build, migrate, verify
+```
+
+`just deploy` copies the database to `backups/` beside it before the new code touches
+it, and restarts the server if `restart` is set in `config/local.toml` (otherwise restart
+`just serve` by hand). It doesn't delete old backups.
+
+Everything on main is meant to deploy cleanly on top of anything older. A change that
+can't is marked with a note in [docs/breaking/](docs/breaking/README.md), and
+`just deploy` stops and shows the note instead of applying it.

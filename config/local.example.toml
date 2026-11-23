@@ -1,0 +1,10 @@
+# Settings for one machine. Copy to config/local.toml, which is not committed.
+
+env = "prod"   # which config/<env>.toml this machine runs (without this file: dev)
+
+# Any key from config/<env>.toml can be overridden here.
+# db = "/Volumes/data/misty/misty.db"
+# host = "0.0.0.0"   # reachable from other devices; there is no auth, so trusted networks only
+
+# Run by `just deploy` once the new code is applied, to restart the server.
+# restart = "launchctl kickstart -k gui/$(id -u)/misty"
