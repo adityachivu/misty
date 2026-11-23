@@ -615,7 +615,8 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     "the group task is discarded. collapse {restored}: popped groups whose parts were untouched " +
     "come back. Bubbles only move within the root task they are under, or out to the top level.";
   const SETTLE_MS = 6000; // quiet time after the board is closed before the draft applies
-  const HOLD_MS = 15000; // lease while a bubble is open or dragged, renewed every few seconds
+  const HOLD_MS = 15000; // lease while a bubble is open or dragged
+  const RENEW_MS = 5000; // how often the lease is renewed: well inside HOLD_MS
   const DRAFT_KEY = "misty.dartboard.draft";
 
   let draftId: string | null = (() => { try { return sessionStorage.getItem(DRAFT_KEY); } catch { return null; } })();
@@ -623,6 +624,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   let draftBusy = false; // applying / finishing
   let syncChain: Promise<unknown> = Promise.resolve();
   let held = false;
+  let leaseAt = 0; // performance.now() when the lease was last sent
 
   const setDraftId = (id: string | null) => {
     draftId = id;
@@ -673,7 +675,11 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     if (now === held) return;
     held = now;
     draftDue = held || !draftId ? null : performance.now() + SETTLE_MS;
-    if (draftId) { const id = draftId; queue(() => ctx.drafts.update(id, { hold_ms: held ? HOLD_MS : SETTLE_MS })); }
+    if (draftId) {
+      const id = draftId;
+      leaseAt = performance.now();
+      queue(() => ctx.drafts.update(id, { hold_ms: held ? HOLD_MS : SETTLE_MS }));
+    }
   }
 
   function collapseAll() {
@@ -713,7 +719,12 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   }
   const pollTimer = setInterval(() => {
     void pollDraft();
-    if (held && draftId) { const id = draftId; queue(() => ctx.drafts.update(id, { hold_ms: HOLD_MS })); }
+    // Renew the lease now and then, not on every tick: a bubble can stay open for hours.
+    if (held && draftId && performance.now() - leaseAt >= RENEW_MS) {
+      const id = draftId;
+      leaseAt = performance.now();
+      queue(() => ctx.drafts.update(id, { hold_ms: HOLD_MS }));
+    }
   }, 1000);
 
   async function applyNow() {
@@ -769,6 +780,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
 
   window.addEventListener("pointermove", ev => {
     if (!drag) return;
+    if (drag.started && ev.buttons === 0) return cancelDrag(); // let go outside the window
     if (!drag.started) {
       if (Math.hypot(ev.clientX - drag.x0, ev.clientY - drag.y0) < 4) return;
       drag.started = true;
@@ -799,6 +811,24 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       drag.hit = hit;
     }
   }, on);
+
+  /** Give up a drag without dropping: the bubble goes back where it was. */
+  function cancelDrag() {
+    const d = drag;
+    drag = null;
+    if (!d?.started) return;
+    d.hit?.el.classList.remove("is-drop-target", "is-drop-area", "is-drop-blocked");
+    d.float?.remove();
+    d.el.classList.remove("is-drag-src");
+    viewport.classList.remove("is-dragging");
+    showSchedule(null);
+    rebuildFromDraft();
+  }
+  // A drag can end without a pointerup: the browser takes the pointer over (a touch
+  // scroll), or the button is let go outside the window. While `drag` is set nothing
+  // renders, so a drag that never ended would freeze the board.
+  window.addEventListener("pointercancel", cancelDrag, on);
+  window.addEventListener("blur", cancelDrag, on);
 
   window.addEventListener("pointerup", ev => {
     const d = drag;

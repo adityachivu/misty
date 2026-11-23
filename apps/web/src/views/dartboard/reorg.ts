@@ -49,7 +49,10 @@ const clone = (r: Reorg): Reorg => ({
 let counter = 0;
 const newId = () => `${NEW}${Date.now().toString(36)}${(counter++).toString(36)}`;
 
-const LIVE = new Set(["open", "done"]);
+// Everything but discarded. A released task isn't drawn, but it still belongs to its
+// parent: when a level is popped it moves up with the rest, since a task can't be
+// discarded while anything that isn't discarded is still under it.
+const LIVE = new Set(["open", "done", "released"]);
 
 /** Read access to the tree as the draft would leave it. */
 export class Tree {

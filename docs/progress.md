@@ -3,7 +3,7 @@
 A living log: what's done, what's next, known problems, and ideas not yet scheduled.
 Design decisions themselves go in `docs/adr/`. This file is for everything around them.
 
-_Last updated: 2026-11-16 · branch `bubble-drafts`_
+_Last updated: 2026-11-23 · branch `bubble-drafts`_
 
 ## Done
 
@@ -50,6 +50,23 @@ _Last updated: 2026-11-16 · branch `bubble-drafts`_
 - **After the drop,** the bubble swims back to its own wedge, and a label shows the date
   while dragging.
 
+### Brought up to date with main (MCP server, dev/prod split)
+- **One batch path.** Applying a draft and the MCP tool `apply_edits` both run
+  `TaskService.execute_batch`. A step refers to a task created earlier by position
+  (`"$n"`) or by name (`new:<label>`).
+- **Pop and the discard rule.** `discard_task` now refuses a task that still has subtasks
+  that aren't discarded. Popping a level therefore moves its released subtasks up too
+  (they aren't drawn, but they are still its subtasks).
+- **Sturdier settling.** The settle loop survives a failed pass, and one draft failing
+  doesn't hold up the others.
+- **Quieter and safer dragging.** The lease is renewed every 5s, not every second. A drag
+  that ends without a pointer-up (touch scroll, button let go outside the window, window
+  loses focus) is cancelled instead of freezing the board.
+- **Readable history.** A draft's edits are recorded with the reason "Reorganised in
+  web:dartboard", not the draft's id (that is already their `correlation_id`).
+- **Compat.** `002_drafts.sql` is registered as shipped, and fixture `0002-drafts` holds a
+  draft in every status, so later changes are checked against stored drafts.
+
 ## Next
 
 ### Task B: merge root bubbles within a quadrant
@@ -87,6 +104,16 @@ bubbles sit outside their place. They no longer jitter, but they cluster.
 - **Unexplained once.** Early on, one e2e run showed a draft "applied" with no edits. A
   timing fix followed, and it hasn't been reproduced since. Watch for it.
 - **Browsers.** Only Chromium has been tested; Safari hasn't.
+- **Two tabs share a draft.** A board adopts its client's most recent open draft at boot,
+  so two tabs (or two devices) reorganising at once overwrite each other's structure.
+- **Agents can't see drafts.** An agent editing over MCP doesn't know a reorganisation is
+  settling. Its edit is respected, and if it makes the draft impossible the draft is
+  rejected with the reason, but nothing warns the agent first.
+- **Agent-composed steps are recorded as the user.** `POST /api/drafts/{id}/apply` with
+  `steps` records the edits as `user:<draft client>`. An MCP tool for this should pass
+  the agent as the actor (`DraftService.apply(actor=...)` already takes one).
+- **The e2e suite needs the machine awake.** It waits on real time (a 6s settle), so a
+  run during a sleep cycle fails the settle checks.
 
 ## Ideas (unscheduled)
 - **The agent as translator:** MCP tools to list and read open drafts, rewrite them, and

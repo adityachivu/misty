@@ -74,6 +74,22 @@ register(
 _ANY_JSON = TypeAdapter[JsonValue](JsonValue)
 
 
+def json_schema() -> dict[str, Any]:
+    """JSON Schema for a task's `attrs`: each registered attribute, plus `x_` experiments.
+
+    Tool listings are built from this, so agents learn the attributes from the registry.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            key: {**spec.adapter.json_schema(), "description": spec.description}
+            for key, spec in ATTRIBUTES.items()
+        },
+        "patternProperties": {f"^{EXPERIMENTAL_PREFIX}": {}},
+        "additionalProperties": False,
+    }
+
+
 def validate_attrs(attrs: dict[str, Any]) -> dict[str, JsonValue]:
     """Validate and normalise attribute values. Raises CommandRejected."""
     result: dict[str, JsonValue] = {}

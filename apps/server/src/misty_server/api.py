@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Annotated, Any
@@ -10,8 +11,11 @@ from pydantic import BaseModel, Field, JsonValue
 
 from misty_core import Actor, CommandRejected, Edit, Task, TaskState
 from misty_core.structure import Step, Structure
+from misty_server import mcp_server
 from misty_store import Draft, DraftService, DraftStatus, TaskService
 from misty_store.drafts import DEFAULT_SETTLE_MS
+
+log = logging.getLogger(__name__)
 
 
 class CommandRequest(BaseModel):
@@ -74,6 +78,8 @@ def create_app(
 ) -> FastAPI:
     """`settle_every`: seconds between checks for settled drafts; None disables it."""
     drafts = DraftService(service)
+    mcp = mcp_server.build_server(service)
+    mcp_routes = mcp_server.http_routes(mcp)
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
@@ -81,23 +87,29 @@ def create_app(
             assert settle_every is not None
             while True:
                 await asyncio.sleep(settle_every)
-                await asyncio.to_thread(drafts.settle_due)
+                try:
+                    await asyncio.to_thread(drafts.settle_due)
+                except Exception:
+                    # One bad pass must not stop drafts settling for the rest of the run.
+                    log.exception("settling drafts failed; trying again in %ss", settle_every)
 
         task = asyncio.create_task(settle_loop()) if settle_every else None
-        yield
-        if task:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        try:
+            async with mcp.session_manager.run():
+                yield
+        finally:
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     app = FastAPI(title="misty", lifespan=lifespan)
     app.state.drafts = drafts
 
     def draft_response(draft: Draft) -> DraftResponse:
-        edits = [
-            e for seq in draft.seqs or [] for e in service.edits(after_seq=seq - 1, upto_seq=seq)
-        ]
-        return DraftResponse(draft=draft, edits=edits)
+        seqs = set(draft.seqs or [])
+        found = service.find_edits(correlation_id=draft.id) if seqs else []
+        return DraftResponse(draft=draft, edits=[e for e in found if e.seq in seqs])
 
     def rejected(e: CommandRejected) -> HTTPException:
         return HTTPException(status_code=400, detail=str(e))
@@ -116,7 +128,7 @@ def create_app(
 
     @app.post("/api/commands", responses={400: {"description": "Command rejected"}})
     def run_command(req: CommandRequest) -> EditResponse:
-        """The UI write path: the same TaskService.execute that MCP tools will use."""
+        """The UI write path: the same TaskService.execute that the MCP tools use."""
         try:
             edit = service.execute(
                 req.tool,
@@ -183,6 +195,9 @@ def create_app(
             return DraftResponse(draft=drafts.discard(draft_id))
         except CommandRejected as e:
             raise rejected(e) from e
+
+    # Agents: the same edits as tools, at /mcp. Added before the web app, which claims "/".
+    app.router.routes.extend(mcp_routes)
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")

@@ -147,3 +147,24 @@ def test_settle_loop_applies_drafts(service):
                 break
             time.sleep(0.02)
         assert client.get(f"/api/drafts/{draft['id']}").json()["draft"]["status"] == "applied"
+
+
+def test_settle_loop_keeps_going_after_a_failed_pass(service):
+    import time
+
+    app = create_app(service, settle_every=0.02)
+    calls = []
+
+    def settle_due():
+        calls.append(len(calls))
+        if len(calls) == 1:
+            raise RuntimeError("database is locked")
+        return []
+
+    app.state.drafts.settle_due = settle_due
+    with TestClient(app):
+        for _ in range(100):
+            if len(calls) >= 3:
+                break
+            time.sleep(0.02)
+    assert len(calls) >= 3

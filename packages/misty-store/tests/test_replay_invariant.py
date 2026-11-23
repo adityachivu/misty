@@ -2,7 +2,7 @@
 
 Hypothesis drives random sequences of commands (valid and invalid) through the real
 service and checks after every step that a fresh replay matches the live projection,
-and that rejected commands leave no trace.
+and that rejected commands (and batches rejected partway) leave no trace.
 """
 
 from hypothesis import settings
@@ -10,6 +10,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
 from misty_core import Actor, CommandRejected
+from misty_core.structure import Step
 from misty_store import TaskService, connect
 
 ACTOR = Actor(kind="agent", id="hypothesis")
@@ -84,6 +85,22 @@ class ReplayMachine(RuleBasedStateMachine):
     def undo(self, data):
         seq = data.draw(st.integers(1, self.service.head_seq()))
         self.execute("undo_edit", {"seq": seq})
+
+    @precondition(lambda self: self.task_ids)
+    @rule(tools=st.lists(lifecycle, min_size=1, max_size=4), title=titles, data=st.data())
+    def batch(self, tools, title, data):
+        targets = st.sampled_from([*self.task_ids, "$0"])
+        commands = [Step("create_task", {"title": title, "parent_id": self.maybe_task(data)})]
+        commands += [Step(tool, {"task_id": data.draw(targets)}) for tool in tools]
+        head = self.service.head_seq()
+        try:
+            edits = self.service.execute_batch(commands, actor=ACTOR)
+        except CommandRejected:
+            assert self.service.head_seq() == head, "a rejected batch left edits behind"
+            return
+        assert self.service.head_seq() == head + len(commands)
+        assert edits[0].task_id is not None
+        self.task_ids.append(edits[0].task_id)
 
     @invariant()
     def replay_matches_projection(self):

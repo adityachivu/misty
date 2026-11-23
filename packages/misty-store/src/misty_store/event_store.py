@@ -74,6 +74,40 @@ def for_task(conn: sqlite3.Connection, task_id: str) -> list[Edit]:
     return [_to_edit(row) for row in rows]
 
 
+def find(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str | None = None,
+    correlation_id: str | None = None,
+    after_seq: int | None = None,
+    limit: int | None = None,
+) -> list[Edit]:
+    """Edits matching every given filter, in seq order.
+
+    With `after_seq`, the first `limit` edits after it (for reading forwards). Without,
+    the most recent `limit`.
+    """
+    newest_first = after_seq is None and limit is not None
+    rows = conn.execute(
+        f"""
+        {_SELECT}
+        WHERE e.seq > :after
+          AND (:task_id IS NULL
+               OR e.seq IN (SELECT seq FROM task_edit_targets WHERE task_id = :task_id))
+          AND (:correlation_id IS NULL OR e.correlation_id = :correlation_id)
+        ORDER BY e.seq {"DESC" if newest_first else "ASC"}
+        LIMIT :limit
+        """,
+        {
+            "after": after_seq or 0,
+            "task_id": task_id,
+            "correlation_id": correlation_id,
+            "limit": -1 if limit is None else limit,
+        },
+    ).fetchall()
+    return [_to_edit(row) for row in (reversed(rows) if newest_first else rows)]
+
+
 def head_seq(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COALESCE(MAX(seq), 0) FROM task_edits").fetchone()[0]
 

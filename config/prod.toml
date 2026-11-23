@@ -1,0 +1,7 @@
+# prod: the machine that holds the real tasks. Select it there with
+# `env = "prod"` in config/local.toml, then update it with `just deploy`.
+
+db = "~/.local/share/misty/misty.db"   # outside the checkout, so re-cloning or `git clean` can't touch it
+host = "127.0.0.1"                     # there is no auth: widen this only in config/local.toml, on a trusted network
+port = 4322
+disposable = false                     # `misty db reset` and `misty db seed` refuse to run

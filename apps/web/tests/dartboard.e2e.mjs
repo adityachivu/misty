@@ -217,7 +217,8 @@ check("...reopens metrics", (await dbTask("metrics")).state, "open");
 check("...unschedules exam prep", (await dbTask("plan exam prep")).attrs.date_kind, "due");
 check("...and discards the new root", (await dbTask("fix the tap")).state, "discarded");
 check("...nothing left to undo", (await page.evaluate(() => window.__session())).staged.length, 0);
-check("bubbles are back home", await until(async () => (await page.evaluate(() => window.__audit())).length === 0), true);
+// a swim home may take up to TRAVEL_MS (8s), as in the drag-to-reschedule check above
+check("bubbles are back home", await until(async () => (await page.evaluate(() => window.__audit())).length === 0, 8000), true);
 await shot("5-after-reset");
 
 // ── reorganising: a draft, applied when it settles ───────────────────────────
@@ -290,6 +291,22 @@ check("apply now writes it", await until(async () => (await dbTask("alpha")).par
 check("...keeping the lab's category and section", [(await dbTask("alpha")).attrs.category, (await dbTask("alpha")).attrs.section], ["projects", "Lab"]);
 check("ab-pair keeps its one remaining subtask (tasks don't dissolve)", await parentTitle("bravo"), "ab-pair");
 await shot("8-pulled-out");
+
+// A subtask an agent released isn't drawn, but it still belongs to its parent. Popping
+// the parent has to move it up with the rest, or the parent couldn't be discarded.
+await command("release_task", { task_id: (await dbTask("charlie")).id });
+await page.reload();
+await page.waitForSelector("#viewport[data-ready]");
+await clickBubble(await rootBubble("reorg lab"));
+await clickBubble(kidBubble("delta + charlie"));
+check("a released subtask isn't drawn", (await nodeOf("delta + charlie")).children.map(c => c.text), ["delta"]);
+await clickSpace(kidBubble("delta + charlie"));
+const popDraft = (await until(async () => (await page.evaluate(() => window.__draft())).id)) || null;
+await page.click("#applyBtn");
+check("popping its parent applies", await until(async () => (await (await fetch(`${BASE}/api/drafts/${popDraft}`)).json()).draft.status === "applied"), true);
+check("...the parent is discarded", (await dbTask("delta + charlie")).state, "discarded");
+check("...and the released subtask moved up with delta, still released",
+  [(await dbTask("charlie")).state, await parentTitle("charlie"), await parentTitle("delta")], ["released", "reorg lab", "reorg lab"]);
 
 check("no page errors", pageErrors, []);
 await browser.close();

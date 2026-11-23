@@ -1,0 +1,6 @@
+# dev: this machine, for testing. The database is throwaway (`just fresh` wipes it).
+
+db = "data/misty.db"   # relative paths are from the repo root
+host = "127.0.0.1"
+port = 4322
+disposable = true      # allows `misty db reset` and `misty db seed`

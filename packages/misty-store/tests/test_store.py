@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from misty_core import Actor, CommandRejected, TaskState
+from misty_core.structure import Step
 from misty_core.upcasters import UPCASTERS
 from misty_store import TaskService, projection
 
@@ -50,6 +51,157 @@ def test_history_includes_multi_task_edits(service):
     child = service.execute("create_task", {"title": "Child", "parent_id": parent}, actor=USER)
     undo = service.execute("undo_edit", {"seq": child.seq}, actor=USER)
     assert [e.seq for e in service.history(child.task_id)] == [child.seq, undo.seq]
+
+
+def make(service, title, **args):
+    task_id = service.execute("create_task", {"title": title, **args}, actor=USER).task_id
+    assert task_id is not None
+    return task_id
+
+
+def test_batch_is_all_or_nothing(service):
+    a = make(service, "A")
+    with pytest.raises(
+        CommandRejected, match=r"edits\[1\] \(retitle_task\).*already has that title"
+    ):
+        service.execute_batch(
+            [
+                Step("create_task", {"title": "B"}),
+                Step("retitle_task", {"task_id": a, "title": "A"}),
+            ],
+            actor=AGENT,
+        )
+    assert service.head_seq() == 1
+    assert [t.title for t in service.list_tasks()] == ["A"]
+    assert service.verify() == []
+
+
+def test_batch_can_refer_to_the_tasks_it_creates(service):
+    a, b = make(service, "A"), make(service, "B")
+    edits = service.execute_batch(
+        [
+            Step("create_task", {"title": "Umbrella"}, as_="new:umbrella"),
+            Step("move_task", {"task_id": a, "parent_id": "$0"}),
+            Step("move_task", {"task_id": b, "parent_id": "new:umbrella"}),  # by name or position
+            Step("create_task", {"title": "Sub", "parent_id": "$0"}),
+            Step("retitle_task", {"task_id": "$3", "title": "Sub, renamed"}),
+        ],
+        actor=AGENT,
+        reason="Grouped the flat move",
+    )
+    umbrella = edits[0].task_id
+    assert [t.title for t in service.children(umbrella)] == ["A", "B", "Sub, renamed"]
+    assert [e.seq for e in edits] == [3, 4, 5, 6, 7]
+    assert {e.reason for e in edits} == {"Grouped the flat move"}
+    [correlation_id] = {e.correlation_id for e in edits}
+    assert correlation_id.startswith("batch:")
+    assert service.find_edits(correlation_id=correlation_id) == edits
+    assert service.verify() == []
+
+
+A = Step("create_task", {"title": "A"})
+
+
+@pytest.mark.parametrize(
+    ("steps", "message"),
+    [
+        ([Step("create_task", {"title": "A", "parent_id": "$0"})], "created earlier"),
+        ([A, Step("move_task", {"task_id": "$0", "parent_id": "$2"})], "created earlier"),
+        # $1 is a step, but not one that created a task
+        (
+            [A, Step("complete_task", {"task_id": "$0"}), Step("reopen_task", {"task_id": "$1"})],
+            "created earlier",
+        ),
+        ([A, Step("move_task", {"task_id": "$0", "parent_id": "new:x"})], "created earlier"),
+        ([A, Step("complete_task", {"task_id": "$0"}, as_="new:x")], "no task to call 'new:x'"),
+    ],
+)
+def test_batch_rejects_bad_references(service, steps, message):
+    with pytest.raises(CommandRejected, match=message):
+        service.execute_batch(steps, actor=AGENT)
+    assert service.head_seq() == 0
+
+
+def test_an_empty_batch_writes_nothing(service):
+    assert service.execute_batch([], actor=AGENT) == []
+    assert service.head_seq() == 0
+
+
+def test_a_batch_is_undone_as_a_group_in_reverse(service):
+    a = make(service, "A")
+    edits = service.execute_batch(
+        [
+            Step("create_task", {"title": "Umbrella"}),
+            Step("move_task", {"task_id": a, "parent_id": "$0"}),
+            Step("create_task", {"title": "Sub", "parent_id": "$0"}),
+        ],
+        actor=AGENT,
+        correlation_id="turn-1",
+    )
+    umbrella, sub = edits[0].task_id, edits[2].task_id
+    seqs = [e.seq for e in service.find_edits(correlation_id="turn-1")]
+    head = service.head_seq()
+
+    # In the order they were made, the umbrella would be discarded with A still under it.
+    with pytest.raises(CommandRejected, match=r"edits\[0\] \(undo_edit\).*subtask"):
+        service.execute_batch([Step("undo_edit", {"seq": seq}) for seq in seqs], actor=AGENT)
+    assert service.head_seq() == head
+
+    service.execute_batch([Step("undo_edit", {"seq": seq}) for seq in reversed(seqs)], actor=AGENT)
+    assert service.get_task(a).parent_id is None
+    assert service.get_task(umbrella).state is TaskState.DISCARDED
+    assert service.get_task(sub).state is TaskState.DISCARDED
+    assert service.verify() == []
+
+
+def test_list_tasks_filters(service):
+    parent = make(service, "Move flat", attrs={"category": "admin", "notes": "Ask Priya"})
+    make(service, "Pack BOXES", parent_id=parent, attrs={"quick": True})
+    make(service, "Book van", parent_id=parent)
+    make(service, "Essay", attrs={"category": "uni", "x_n": 1})
+
+    def titles(**filters):
+        return [t.title for t in service.list_tasks(**filters)]
+
+    assert titles(parent_id=parent) == ["Pack BOXES", "Book van"]
+    assert titles(attrs={"category": "admin"}) == ["Move flat"]
+    assert titles(attrs={"quick": True}) == ["Pack BOXES"]
+    assert titles(attrs={"x_n": True}) == []  # JSON equality: 1 is not true
+    assert titles(attrs={"category": "uni", "x_n": 1}) == ["Essay"]
+    assert titles(query="boxes") == ["Pack BOXES"]
+    assert titles(query="priya") == ["Move flat"]  # notes are searched too
+    assert titles(query="van", attrs={"quick": True}) == []
+
+
+def test_children_ancestors_and_open_child_counts(service):
+    root = make(service, "Root")
+    mid = make(service, "Mid", parent_id=root)
+    leaf = make(service, "Leaf", parent_id=mid)
+    done = make(service, "Done", parent_id=root)
+    service.execute("complete_task", {"task_id": done}, actor=USER)
+
+    assert [t.title for t in service.children(root)] == ["Mid", "Done"]
+    assert [t.title for t in service.ancestors(leaf)] == ["Root", "Mid"]
+    assert service.ancestors(root) == []
+    assert service.open_child_counts() == {root: 1, mid: 1}
+
+
+def test_find_edits(service):
+    a = service.execute("create_task", {"title": "A"}, actor=USER, correlation_id="one")
+    b = service.execute("create_task", {"title": "B"}, actor=USER, correlation_id="two")
+    service.execute("retitle_task", {"task_id": a.task_id, "title": "A2"}, actor=USER)
+    undo = service.execute("undo_edit", {"seq": b.seq}, actor=USER, correlation_id="two")
+
+    def seqs(**filters):
+        return [e.seq for e in service.find_edits(**filters)]
+
+    assert seqs() == [1, 2, 3, 4]
+    assert seqs(task_id=a.task_id) == [1, 3]
+    assert seqs(task_id=b.task_id) == [2, undo.seq]
+    assert seqs(correlation_id="two") == [2, 4]
+    assert seqs(limit=2) == [3, 4]  # the most recent, still oldest first
+    assert seqs(after_seq=1, limit=2) == [2, 3]  # reading forwards
+    assert seqs(task_id=a.task_id, correlation_id="two") == []
 
 
 def test_log_is_append_only(service):

@@ -1,6 +1,7 @@
 """Reorganisation drafts (ADR 0003): stored, settled, translated and applied atomically."""
 
 import json
+import logging
 import sqlite3
 import uuid
 from collections.abc import Callable, Sequence
@@ -14,6 +15,8 @@ from misty_core import Actor, CommandRejected, Edit, Task
 from misty_core.structure import Step, Structure, check, plan
 from misty_store.db import transaction
 from misty_store.service import TaskService
+
+log = logging.getLogger(__name__)
 
 STANDIN = "standin:structure"
 DEFAULT_SETTLE_MS = 6000
@@ -170,7 +173,11 @@ class DraftService:
             if draft.status is not DraftStatus.OPEN:
                 return draft
             who = actor or Actor(kind="user", id=draft.client)
-            reason = f"draft {draft.id} ({translator})" + (f": {draft.note}" if draft.note else "")
+            # Shown to the user in each task's history. The draft's id is already the
+            # edits' correlation_id, so the reason says what happened, in words.
+            reason = f"Reorganised in {draft.client}" + (f": {draft.note}" if draft.note else "")
+            if translator != STANDIN:
+                reason += f" (edits composed by {translator})"
             try:
                 planned = (
                     list(steps)
@@ -218,7 +225,15 @@ class DraftService:
         """Apply, with the stand-in, every open draft that has settled. Returns them."""
         now = self.clock()
         due = [d for d in self.list_drafts(DraftStatus.OPEN) if d.due_at() <= now]
-        return [self.apply(d.id) for d in due]
+        settled: list[Draft] = []
+        for draft in due:
+            try:
+                settled.append(self.apply(draft.id))
+            except Exception:
+                # Not a rejection (that marks the draft): something broke. Leave it open
+                # to try again, and don't let it hold up the drafts behind it.
+                log.exception("draft %s could not be applied; it stays open", draft.id)
+        return settled
 
     # ── reads ────────────────────────────────────────────────────────────────
 

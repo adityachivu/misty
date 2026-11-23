@@ -1,7 +1,7 @@
-# Misty dev tasks. `just` lists them.
-
-db := env("MISTY_DB", "data/misty.db")
-port := "4322"
+# Misty tasks. `just` lists them.
+#
+# Settings come from config/<env>.toml. The env is MISTY_ENV, else `env` in
+# config/local.toml, else dev; `just env` shows what this machine resolves to.
 
 default:
     @just --list
@@ -12,10 +12,30 @@ setup:
     uv sync
     cd apps/web && npm install
 
-# Build the web app and serve it with the API on :4322
+# Show which environment this machine runs, and its settings
+[group('dev')]
+env:
+    uv run misty config
+
+# Build the web app and serve it with the API
 [group('dev')]
 serve: build
-    uv run misty serve --db {{db}} --port {{port}}
+    uv run misty serve
+
+# Keep the deploy recipe exactly these two lines. `just` reads it before the pull, so a
+# step added here would not run on the deploy that brings it in. New steps go in
+# `misty deploy`, which runs from the code that was just pulled.
+
+# On the prod machine: pull main and apply it (backup, build, migrate, verify)
+[group('prod')]
+deploy *args:
+    git pull --ff-only
+    uv run --frozen misty deploy {{args}}
+
+# Copy the database into the backups folder next to it
+[group('prod')]
+backup:
+    uv run misty db backup
 
 # Web dev server on :5173 with hot reload (run `just api` alongside it)
 [group('dev')]
@@ -25,36 +45,36 @@ dev:
 # API only, for use with `just dev`
 [group('dev')]
 api:
-    uv run misty serve --db {{db}} --port {{port}} --web /nonexistent
+    uv run misty serve --web /nonexistent
 
 [group('dev')]
 build:
     cd apps/web && npm run build
 
-# Wipe the database and fill it with random test tasks
+# Wipe the database and fill it with random test tasks (dev only)
 [group('db')]
 fresh n="20":
-    uv run misty db seed --db {{db}} --reset -n {{n}}
+    uv run misty db seed --reset -n {{n}}
 
-# Add random test tasks to the existing database
+# Add random test tasks to the existing database (dev only)
 [group('db')]
 seed n="20":
-    uv run misty db seed --db {{db}} -n {{n}}
+    uv run misty db seed -n {{n}}
 
-# Delete the database
+# Delete the database (dev only)
 [group('db')]
 reset:
-    uv run misty db reset --db {{db}}
+    uv run misty db reset
 
 # Check that replaying the edit log reproduces the tasks table
 [group('db')]
 verify:
-    uv run misty db verify --db {{db}}
+    uv run misty db verify
 
 # Most recent edits
 [group('db')]
 tail n="20":
-    uv run misty db tail --db {{db}} -n {{n}}
+    uv run misty db tail -n {{n}}
 
 # Lint, type-check, and run every test (Python + browser)
 [group('quality')]

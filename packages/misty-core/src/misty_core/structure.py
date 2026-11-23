@@ -6,16 +6,19 @@ tasks it removes. `plan` turns that into ordered commands; `check` confirms that
 matches it. Both are pure.
 """
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from misty_core.attributes import same_value
 from misty_core.errors import CommandRejected
 from misty_core.task import Task, TaskState
 
 NEW = "new:"
+_POSITION = re.compile(r"\$\d+")
 
 
 class StructureNode(BaseModel):
@@ -40,8 +43,9 @@ class Structure(BaseModel):
 
 @dataclass(frozen=True)
 class Step:
-    """One command in a batch. `as_` names a created task so later steps can use
-    `new:<label>` in their `task_id`/`parent_id`."""
+    """One command in a batch. Later steps can use the task it creates in their
+    `task_id`/`parent_id`, as "$n" (this step's position) or as the name `as_` gives it,
+    by convention `new:<label>`."""
 
     tool: str
     args: dict[str, Any]
@@ -55,14 +59,21 @@ def is_new(ref: str | None) -> bool:
     return ref is not None and ref.startswith(NEW)
 
 
+def is_placeholder(ref: str) -> bool:
+    """Whether `ref` stands for a task a batch creates: `new:<label>` or "$n"."""
+    return ref.startswith(NEW) or _POSITION.fullmatch(ref) is not None
+
+
 def resolve_refs(args: Mapping[str, Any], created: Mapping[str, str]) -> dict[str, Any]:
-    """Replace `new:<label>` in `task_id`/`parent_id` with the id it was created as."""
+    """Replace a placeholder in `task_id`/`parent_id` with the id it was created as."""
     out = dict(args)
     for key in ("task_id", "parent_id"):
         ref = out.get(key)
-        if isinstance(ref, str) and is_new(ref):
+        if isinstance(ref, str) and is_placeholder(ref):
             if ref not in created:
-                raise CommandRejected(f"{key} {ref!r} refers to a task not created earlier")
+                raise CommandRejected(
+                    f"{key} {ref!r} doesn't refer to a task created earlier in this batch"
+                )
             out[key] = created[ref]
     return out
 
@@ -142,7 +153,8 @@ def plan(structure: Structure, tasks: Mapping[str, Task]) -> list[Step]:
     for n in structure.nodes:
         if is_new(n.id):
             continue
-        changed = {k: v for k, v in n.attrs.items() if tasks[n.id].attrs.get(k) != v}
+        have = tasks[n.id].attrs
+        changed = {k: v for k, v in n.attrs.items() if k not in have or not same_value(have[k], v)}
         if changed:
             steps.append(Step("set_attributes", {"task_id": n.id, "attrs": changed}))
 
@@ -152,10 +164,11 @@ def plan(structure: Structure, tasks: Mapping[str, Task]) -> list[Step]:
             raise CommandRejected(f"{task_id!r} is both kept and removed")
         if task.state is TaskState.DISCARDED:
             continue
+        # The same rule discard_task enforces, said in the structure's terms.
         stranded = [
             t.id
             for t in tasks.values()
-            if t.state in (TaskState.OPEN, TaskState.DONE) and sim.parent_of(t.id) == task_id
+            if t.state is not TaskState.DISCARDED and sim.parent_of(t.id) == task_id
         ]
         if stranded:
             raise CommandRejected(
@@ -167,7 +180,10 @@ def plan(structure: Structure, tasks: Mapping[str, Task]) -> list[Step]:
 
 def check(structure: Structure, tasks: Mapping[str, Task], created: Mapping[str, str]) -> list[str]:
     """How `tasks` differs from `structure`. Empty means it matches."""
-    ref = lambda r: created.get(r, r) if r is not None else None  # noqa: E731
+
+    def ref(r: str | None) -> str | None:
+        return created.get(r, r) if r is not None else None
+
     problems: list[str] = []
     for n in structure.nodes:
         task = tasks.get(ref(n.id) or "")
@@ -181,7 +197,7 @@ def check(structure: Structure, tasks: Mapping[str, Task], created: Mapping[str,
         if is_new(n.id) and task.title != n.title:
             problems.append(f"{n.id}: title is {task.title!r}, intended {n.title!r}")
         for k, v in n.attrs.items():
-            if task.attrs.get(k) != v:
+            if k not in task.attrs or not same_value(task.attrs[k], v):
                 problems.append(f"{n.id}: {k} is {task.attrs.get(k)!r}, intended {v!r}")
     for task_id in structure.removed:
         task = tasks.get(task_id)

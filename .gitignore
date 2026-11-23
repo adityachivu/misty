@@ -225,3 +225,6 @@ data/
 *.db-wal
 *.db-shm
 node_modules/
+
+# This machine only: which env it runs, and overrides (see config/local.example.toml)
+config/local.toml

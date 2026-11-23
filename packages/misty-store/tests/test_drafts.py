@@ -59,7 +59,7 @@ def node(id, parent, **kw):
 
 def test_batch_is_all_or_nothing(service, tree):
     head = service.head_seq()
-    with pytest.raises(CommandRejected, match="Step 2"):
+    with pytest.raises(CommandRejected, match=r"edits\[1\] \(move_task\)"):
         service.execute_batch(
             [
                 Step("create_task", {"title": "g", "parent_id": tree["root"]}, as_="new:g"),
@@ -184,3 +184,57 @@ def test_new_root_gets_attrs(service, drafts, tree):
     assert drafts.apply(d.id).status is DraftStatus.APPLIED
     task = service.get_task(tree["a"])
     assert task.parent_id is None and task.attrs["category"] == "work"
+
+
+def test_pop_carries_released_subtasks_up_too(service, drafts, tree):
+    # An agent released e. It isn't drawn, but it still belongs to c, and c can't be
+    # discarded while it is under it.
+    service.execute("release_task", {"task_id": tree["e"]}, actor=USER)
+    left_behind = drafts.create(client="web:test", vocabulary="bubbles")
+    drafts.update(
+        left_behind.id, after=Structure(nodes=[node(tree["d"], tree["root"])], removed=[tree["c"]])
+    )
+    result = drafts.apply(left_behind.id)
+    assert result.status is DraftStatus.REJECTED
+    assert "hide its subtasks" in result.error and tree["e"] in result.error
+
+    carried = drafts.create(client="web:test", vocabulary="bubbles")
+    drafts.update(
+        carried.id,
+        after=Structure(
+            nodes=[node(tree["d"], tree["root"]), node(tree["e"], tree["root"])],
+            removed=[tree["c"]],
+        ),
+    )
+    result = drafts.apply(carried.id)
+    assert result.status is DraftStatus.APPLIED, result.error
+    assert service.get_task(tree["e"]).parent_id == tree["root"]
+    assert service.get_task(tree["e"]).state is TaskState.RELEASED
+    assert service.get_task(tree["c"]).state is TaskState.DISCARDED
+    assert service.verify() == []
+
+
+def test_a_draft_that_cancels_out_applies_with_no_edits(service, drafts, tree):
+    d = drafts.create(client="web:test", vocabulary="bubbles")
+    drafts.update(d.id, after=Structure(nodes=[node(tree["a"], tree["root"])]))  # where it is
+    head = service.head_seq()
+    result = drafts.apply(d.id)
+    assert (result.status, result.seqs) == (DraftStatus.APPLIED, [])
+    assert service.head_seq() == head
+
+
+def test_one_draft_failing_does_not_hold_up_the_rest(service, drafts, clock, tree, monkeypatch):
+    broken = drafts.create(client="web:test", vocabulary="bubbles", settle_ms=0)
+    fine = drafts.create(client="web:test", vocabulary="bubbles", settle_ms=0)
+    drafts.update(fine.id, after=Structure(nodes=[node(tree["a"], tree["c"])]))
+    apply = drafts.apply
+
+    def flaky(draft_id, **kwargs):
+        if draft_id == broken.id:
+            raise RuntimeError("disk on fire")
+        return apply(draft_id, **kwargs)
+
+    monkeypatch.setattr(drafts, "apply", flaky)
+    assert [d.id for d in drafts.settle_due()] == [fine.id]
+    assert drafts.get(broken.id).status is DraftStatus.OPEN  # left to try again
+    assert service.get_task(tree["a"]).parent_id == tree["c"]
