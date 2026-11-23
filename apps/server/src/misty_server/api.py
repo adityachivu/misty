@@ -1,3 +1,5 @@
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -6,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, JsonValue
 
 from misty_core import Actor, CommandRejected, Edit, Task, TaskState
+from misty_server import mcp_server
 from misty_store import TaskService
 
 
@@ -27,7 +30,15 @@ class EditResponse(BaseModel):
 
 
 def create_app(service: TaskService, *, static_dir: Path | None = None) -> FastAPI:
-    app = FastAPI(title="misty")
+    mcp = mcp_server.build_server(service)
+    mcp_routes = mcp_server.http_routes(mcp)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+        async with mcp.session_manager.run():
+            yield
+
+    app = FastAPI(title="misty", lifespan=lifespan)
 
     @app.get("/api/tasks")
     def list_tasks(state: Annotated[list[TaskState] | None, Query()] = None) -> TasksResponse:
@@ -55,6 +66,9 @@ def create_app(service: TaskService, *, static_dir: Path | None = None) -> FastA
         except CommandRejected as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return EditResponse(edit=edit)
+
+    # Agents: the same edits as tools, at /mcp. Added before the web app, which claims "/".
+    app.router.routes.extend(mcp_routes)
 
     if static_dir is not None and static_dir.is_dir():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")

@@ -32,6 +32,8 @@ edit (resolved fact)            ← ids, timestamps, before/after values all fix
    path. It is rejected on conflict, and an undo can itself be undone.
 8. `TaskService.verify()` replays in memory and diffs against the projection. A
    Hypothesis state machine checks this after every step of random command sequences.
+9. A batch (`TaskService.execute_many`) is several ordinary edits appended in one
+   transaction. The log has no notion of a batch beyond their shared `correlation_id`.
 
 ## Schema
 
@@ -62,12 +64,33 @@ Lifecycle is not a workflow: any state can move to any other. `released` means "
 on purpose" and is a legitimate outcome. `discarded` means "captured by mistake" and is
 hidden from views. Nothing is ever hard-deleted.
 
-## Processes (planned)
+Two rules tie lifecycle to the tree, so that live tasks don't end up hidden under a
+discarded one: creating or moving a task under a discarded parent is rejected, and so is
+discarding a task that still has subtasks that aren't discarded. (Reopening a discarded
+subtask of a discarded parent is not rejected yet.) Completing or releasing a parent is
+always allowed and leaves its subtasks alone.
 
-- **`taskd`** (`apps/server`): the only process that serves the DB. `/mcp` (Streamable
-  HTTP), `/api/*` REST reads, `POST /api/commands` (the UI write path), `/api/stream` (SSE),
-  and `?as_of_seq=N` time travel. A stdio MCP entry point shares the same DB file
-  (WAL + `BEGIN IMMEDIATE`).
+## MCP tools
+
+Agents get the ten edits above, plus (`apps/server/src/misty_server/tools.py`):
+
+- `apply_edits`: a batch of edits, all or nothing. Restructuring (break down, group,
+  split, merge, dissolve a parent) is a batch, not a set of edit types of its own. `"$n"`
+  refers to the task created by item `n`. Undoing a batch is another batch: its
+  `undo_edit`s, newest first.
+- `list_tasks`, `get_task`, `list_edits`: reads. Tasks are returned with `open_children`,
+  which is counted on read and is not part of the projection.
+
+Writes over MCP must give a `reason`. The actor is `agent:<client name>` from the
+handshake, never an argument. Where a task came from (split from, merged into, follow-up
+of) is recorded in `reason`; there is no structured link.
+
+## Processes
+
+- **`taskd`** (`apps/server`): the only process that serves the DB. `/api/*` REST reads,
+  `POST /api/commands` (the UI write path), and `/mcp` (Streamable HTTP). `misty mcp`
+  serves the same tools over stdio from its own process, sharing the DB file (WAL +
+  `BEGIN IMMEDIATE`). Planned: `/api/stream` (SSE) and `?as_of_seq=N` time travel.
 - **web** (`apps/web`): each visualisation declares which edit types it may dispatch.
   Types are generated from FastAPI's OpenAPI.
 - **agent** (`apps/agent`): an MCP client of `taskd`, never touches SQLite. Suggested

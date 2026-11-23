@@ -12,6 +12,10 @@ class StateView(Protocol):
 
     def get_edit(self, seq: int) -> Edit | None: ...
 
+    def children(self, task_id: str) -> list[Task]:
+        """The task's direct subtasks, in any state. Only `decide` may use this."""
+        ...
+
 
 class MemoryView:
     """A view over in-memory dicts. Sees later mutations of those dicts."""
@@ -26,6 +30,9 @@ class MemoryView:
     def get_edit(self, seq: int) -> Edit | None:
         return self._edits.get(seq)
 
+    def children(self, task_id: str) -> list[Task]:
+        return [task for task in self._tasks.values() if task.parent_id == task_id]
+
 
 class OverlayView:
     """Stages changes on top of another view without touching it."""
@@ -39,6 +46,11 @@ class OverlayView:
 
     def get_edit(self, seq: int) -> Edit | None:
         return self.base.get_edit(seq)
+
+    def children(self, task_id: str) -> list[Task]:
+        # A staged change may have moved a task into or out of this parent.
+        candidates = {task.id: task for task in self.base.children(task_id)} | self.changes
+        return [task for task in candidates.values() if task.parent_id == task_id]
 
     def update(self, changes: Mapping[str, Task]) -> None:
         self.changes.update(changes)

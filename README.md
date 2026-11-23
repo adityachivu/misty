@@ -11,7 +11,7 @@ swappable visualisations, each suited to a different way of relating to tasks.
 |---|---|---|
 | `packages/misty-core` | Pure domain: `Task`, edit types, the reducer. No IO. | ✅ |
 | `packages/misty-store` | SQLite: append-only edit log, rebuildable `tasks` projection, `TaskService`. | ✅ |
-| `apps/server` | `taskd`: REST API + `misty` CLI (serve, db verify/rebuild/tail, import). MCP + SSE next. | 🚧 |
+| `apps/server` | `taskd`: REST API, MCP server (`/mcp` and `misty mcp`), and the `misty` CLI. SSE next. | 🚧 |
 | `apps/web` | Browser UI: swappable views (Vite + TS). First view: the dartboard. | 🚧 |
 | `apps/agent` | Agentic middle layer (Claude Agent SDK), an MCP client of `taskd`. | future |
 
@@ -31,6 +31,24 @@ just check      # lint + ty + tsc + pytest + browser tests
 just verify     # replay the edit log, compare with the tasks table
 just tail       # recent edits
 ```
+
+## Agents (MCP)
+
+Agents edit tasks through MCP: one tool per edit type, `apply_edits` to make several as
+one change, and three reads. There are two ways in, with the same tools and the same
+database:
+
+```sh
+# a running `just serve` answers at /mcp (Streamable HTTP)
+claude mcp add --transport http misty http://127.0.0.1:4322/mcp
+
+# or let the agent launch it over stdio; this also works while the server is running
+claude mcp add misty -- uv run --directory /path/to/misty misty mcp
+```
+
+An agent's edits are recorded as `agent:<client name>` with the reason it gave, and any
+of them can be undone. `/mcp` has no auth and only answers to `localhost` / `127.0.0.1`.
+See [apps/server/README.md](apps/server/README.md) for the tools.
 
 ## Dev and prod
 

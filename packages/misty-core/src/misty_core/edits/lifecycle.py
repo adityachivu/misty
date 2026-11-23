@@ -44,7 +44,7 @@ class _Transition(EditType[TaskCommand, StateChangedPayload]):
 
 
 class TaskCompleted(_Transition):
-    """Mark a task as done."""
+    """Mark a task as done. Its subtasks are left as they are."""
 
     type = "task.completed"
     tool_name = "complete_task"
@@ -53,7 +53,8 @@ class TaskCompleted(_Transition):
 
 class TaskReleased(_Transition):
     """Let a task go on purpose. Releasing is a legitimate outcome, not a failure: the
-    task leaves the active views but stays in history and can be reopened."""
+    task leaves the active views but stays in history and can be reopened. Its subtasks
+    are left as they are."""
 
     type = "task.released"
     tool_name = "release_task"
@@ -70,11 +71,24 @@ class TaskReopened(_Transition):
 
 class TaskDiscarded(_Transition):
     """Discard a task that was captured by mistake or is a duplicate. It is hidden from
-    views but stays in history, and the discard can be undone."""
+    views but stays in history, and the discard can be undone. Refused while the task
+    has subtasks that aren't discarded: move them elsewhere or discard them first."""
 
     type = "task.discarded"
     tool_name = "discard_task"
     target = TaskState.DISCARDED
+
+    def decide(self, cmd: TaskCommand, view: StateView, ctx: EditContext) -> StateChangedPayload:
+        payload = super().decide(cmd, view, ctx)
+        # Nothing may be attached to a discarded task (require_live_parent), so nothing
+        # live may be left under one either: it would vanish from every view.
+        kept = [c for c in view.children(cmd.task_id) if c.state is not TaskState.DISCARDED]
+        if kept:
+            raise CommandRejected(
+                f"Task {cmd.task_id!r} has {len(kept)} subtask(s) that aren't discarded. "
+                "Move them elsewhere or discard them first."
+            )
+        return payload
 
 
 ENTER_TOOL: dict[TaskState, str] = {

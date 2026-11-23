@@ -62,6 +62,12 @@ class SqliteView:
     def get_edit(self, seq: int) -> Edit | None:
         return event_store.get(self.conn, seq)
 
+    def children(self, task_id: str) -> list[Task]:
+        rows = self.conn.execute(
+            "SELECT * FROM tasks WHERE parent_id = ? ORDER BY created_at, id", (task_id,)
+        )
+        return [to_task(row) for row in rows]
+
 
 def ensure(conn: sqlite3.Connection) -> bool:
     """Rebuild the projection if its shape or the reducer changed, or it is behind the log.

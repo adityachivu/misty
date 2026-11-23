@@ -95,7 +95,7 @@ def serve(
     port: Annotated[int | None, typer.Option(envvar="MISTY_PORT")] = None,
     web: Annotated[Path, typer.Option(help="Built web app to serve at /.")] = WEB_DIST,
 ) -> None:
-    """Serve the REST API, and the built web app if there is one."""
+    """Serve the REST API, MCP at /mcp, and the built web app if there is one."""
     import uvicorn
 
     from misty_server.api import create_app
@@ -107,6 +107,22 @@ def serve(
         typer.echo(f"no web build at {web}; serving the API only (npm run build in apps/web)")
     typer.echo(f"misty [{s.env}] → http://{s.host}:{s.port}  (db: {s.db})")
     uvicorn.run(create_app(service, static_dir=web), host=s.host, port=s.port, log_level="warning")
+
+
+@app.command("mcp")
+def mcp_stdio(db: DbOption = None) -> None:
+    """Serve the MCP tools over stdio, for an agent that launches Misty itself.
+
+    Works alongside a running `misty serve`: both write through the same database file.
+    """
+    import anyio
+
+    from misty_server.mcp_server import serve_stdio
+
+    s = settings(db)
+    require_acknowledged(s)
+    # Nothing may be printed to stdout here: it carries the protocol.
+    anyio.run(serve_stdio, open_service(s.db))
 
 
 @app.command()
