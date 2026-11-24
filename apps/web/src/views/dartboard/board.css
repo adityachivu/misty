@@ -77,7 +77,7 @@ body {
    and the big open bubble has ample empty rim to click for closing. */
 .body {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 5px; width: 82%; height: 82%;    /* inside the inscribed square, with margin */
+  gap: 7px; width: 82%; height: 82%;    /* inside the inscribed square, with margin */
   text-align: center; pointer-events: none;
 }
 
@@ -95,22 +95,28 @@ body {
   max-width: 100%; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* ── emoji row — only when open ────────────────────────────────────────────── */
-/* Wraps: 7–8 controls don't fit one line inside the circle. The row is part of
-   the centred content group, so the wrap doesn't push anything off-centre. */
-.emoji-row {
-  display: none; flex-wrap: wrap; gap: 3px;
-  justify-content: center; align-items: center;
-  max-width: 100%; pointer-events: auto;
+/* ── actions — only when open ──────────────────────────────────────────────── */
+/* Two or three, never more: what a drag can't say (⚡ ✓, and ↺ once something has
+   changed). They are small circles, like everything else on the board, and sit last
+   in the centred content group. */
+.actions {
+  display: none; gap: 6px; justify-content: center; align-items: center;
+  pointer-events: auto;
 }
-.bubble.is-open > .body > .emoji-row { display: flex; }
-.emoji {
-  background: none; border: 1px solid transparent; border-radius: 6px;
-  font-size: 15px; line-height: 1; padding: 3px 4px; cursor: pointer;
-  opacity: .8; transition: all .1s ease;
+.bubble.is-open > .body > .actions { display: flex; }
+.act {
+  width: 28px; height: 28px; padding: 0; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--bg); color: var(--muted); border: 1px solid var(--line);
+  font: inherit; font-size: 14px; line-height: 1; cursor: pointer;
+  transition: border-color .1s ease, color .1s ease, background .1s ease, transform .1s ease;
 }
-.emoji:hover { background: var(--dot-hi); border-color: var(--line); opacity: 1; transform: translateY(-1px); }
-.emoji.is-on { opacity: 1; background: color-mix(in srgb, var(--yellow) 28%, transparent); }
+.act:hover { border-color: var(--accent); color: var(--fg); transform: translateY(-1px); }
+.act:focus-visible, .add-kid:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.act.is-on { color: var(--fg); border-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 26%, var(--bg)); }
+.act[data-op="undo"] { color: var(--yellow); }
+/* ⚡ is an emoji, so it is yellow whether or not it is on. Off, it goes grey. */
+.act[data-op="zap"]:not(.is-on) { filter: grayscale(1); }
 
 /* ── children — the subtasks, shown inside an open bubble ──────────────────── */
 /* A kid IS a bubble: same markup, same state classes, so every rule above works
@@ -136,22 +142,56 @@ body {
 .bubble.kid.is-open > .body > .text { font-size: 13px; -webkit-line-clamp: 3; }
 .bubble.kid .meta { font-size: 9px; }
 .bubble.kid .zap { font-size: 11px; }
-.bubble.kid .emoji { font-size: 12px; padding: 2px 3px; }
-.bubble.kid .invite input, .bubble.kid .datepick input { font-size: 10px; padding: 3px 5px; }
+.bubble.kid .act { width: 22px; height: 22px; font-size: 11px; }
+.bubble.kid .actions { gap: 4px; }
+.bubble.kid .datepick input { font-size: 10px; padding: 3px 5px; }
 .bubble.kid .hint { font-size: 8px; }
 .bubble.is-d2 .text { font-size: 9px; }
 .bubble.is-d2.is-open > .body > .text { font-size: 11px; }
-.bubble.kid > .body { gap: 3px; }
+.bubble.is-d2 .act { width: 18px; height: 18px; font-size: 9px; }
+.bubble.kid > .body { gap: 4px; }
 
-/* ── the invitation ───────────────────────────────────────────────────────── */
-.invite, .datepick { display: none; pointer-events: auto; width: 82%; }
-.invite input, .datepick input {
+/* ── ＋ and the bubble being named ─────────────────────────────────────────── */
+/* The ＋ is the next subtask's empty place: last among the subtasks, round like them,
+   and dashed, which on this board already means "not there yet". Pressing it turns it
+   into the new bubble, with a text box where the title will be. */
+.add-kid {
+  flex: 0 0 auto; padding: 0; border-radius: 50%;
+  display: grid; place-items: center;
+  background: none; color: var(--muted); border: 2px dashed var(--faint);
+  font: inherit; font-weight: 300; line-height: 1; cursor: pointer;
+  pointer-events: auto;
+  transition: border-color .12s ease, color .12s ease, background .12s ease, scale .12s ease;
+}
+.add-kid { font-size: 22px; }
+.bubble.kid .add-kid { font-size: 17px; }
+.bubble.is-d2 .add-kid { font-size: 14px; border-width: 1.5px; }
+.add-kid:hover { color: var(--fg); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); scale: 1.08; }
+
+.bubble.kid.is-naming {
+  border: 2px solid var(--accent); background: var(--bg); cursor: text;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
+  overflow: visible;                     /* the ring above is outside the border */
+}
+.name-box {
+  display: block; width: 100%; max-height: 100%; margin: 0; padding: 0;
+  background: none; color: var(--fg); border: 0; outline: 0; resize: none; overflow: hidden;
+  font: inherit; font-size: 13px; font-weight: 500; line-height: 1.25; text-align: center;
+  overflow-wrap: break-word; caret-color: var(--accent);
+  pointer-events: auto;
+}
+.name-box::placeholder { color: var(--faint); font-weight: 400; }
+.bubble.is-d2 .name-box { font-size: 11px; }
+
+/* ── the date picker (a root dropped on the rim) ──────────────────────────── */
+.datepick { display: none; pointer-events: auto; width: 82%; }
+.datepick input {
   width: 100%; background: var(--bg); color: var(--fg);
   border: 1px solid var(--line); border-radius: 6px;
   padding: 4px 7px; font: inherit; font-size: 12px; text-align: center;
 }
-.invite input:focus, .datepick input:focus { outline: none; border-color: var(--accent); }
-.invite .hint, .datepick .hint { font-size: 10px; color: var(--muted); margin-top: 4px; }
+.datepick input:focus { outline: none; border-color: var(--accent); }
+.datepick .hint { font-size: 10px; color: var(--muted); margin-top: 4px; }
 /* the native picker is a browser popup, not a DOM child — overflow:hidden on the
    bubble does not clip it, and unlike prompt() it never blocks the JS thread */
 .datepick input[type="date"] { cursor: pointer; }
@@ -249,4 +289,7 @@ body {
 .drop-hint.is-refused { border-color: var(--red); color: var(--red); }
 /* A drag would otherwise select text across every bubble it passes. */
 #viewport .bubble { -webkit-user-select: none; user-select: none; }
-#viewport .bubble input { -webkit-user-select: text; user-select: text; }
+#viewport .bubble input, #viewport .bubble textarea { -webkit-user-select: text; user-select: text; }
+@media (prefers-reduced-motion: reduce) {
+  .act, .add-kid { transition: none; }
+}

@@ -1,8 +1,12 @@
 // Dartboard: a spatial readout of the task database, ported from ~/code/dartboard.
 //
 // Quadrant = category. Radius = time horizon. Dashed border = not broken down yet.
-// ⚡ = quick task. Geometry, physics, the focus chain and the controls are unchanged
-// from the original; see its README for why they look the way they do.
+// ⚡ = quick task. Geometry, physics and the focus chain are unchanged from the
+// original; see its README for why they look the way they do.
+//
+// An open bubble carries only what dragging can't do: ⚡, ✓, and (once something has
+// changed) ↺. Dates are set by dragging a root to a ring. Subtasks are added with the ＋
+// at the end of an open bubble's subtasks: it becomes a bubble you type the name into.
 //
 // What changed is where it reads and writes. The original read Obsidian markdown and
 // only *staged* deltas for misty to drain later, because a bug must never corrupt a
@@ -63,9 +67,13 @@ const SIZE_LEVELS = 2;
 
 // Diameters by depth (index = depth, clamped). One click expands straight to `open`.
 const D_IDLE = [96, 60, 44];
-const D_OPEN = [340, 230, 165]; // floor for an open bubble with nothing inside
+const D_OPEN = [300, 210, 156]; // floor for an open bubble with nothing inside
 const D_DONE = [44, 30, 24];
-const CHROME = [172, 120, 74]; // vertical room an open bubble needs for its own content
+const CHROME = [130, 96, 66]; // vertical room an open bubble needs for its own content
+// The slot after an open bubble's subtasks, indexed by that bubble's depth: the ＋, or
+// the bubble being named, which is bigger than a subtask so there is room to type.
+const D_ADD = [44, 34, 28];
+const D_NAMING = [128, 104, 88];
 
 const K_RADIAL = 0.03, K_CENTER = 0.06, K_ANG_SOFT = 0.004, K_ANG_HARD = 0.055;
 const K_COLLIDE = 0.35, DAMP = 0.85, KE_FLOOR = 0.02;
@@ -123,16 +131,12 @@ const SESSION_KEY = "misty.dartboard.session";
 
 type Elems = ReturnType<typeof makeBubbleShell>;
 
+// Only what a drag can't say. Dates are set by dragging a root to a ring.
 const OPS = [
-  { op: "today", glyph: "☀️", tip: "today", rootOnly: true },
-  { op: "tomorrow", glyph: "➡️", tip: "tomorrow", rootOnly: true },
-  { op: "weekend", glyph: "📅", tip: "weekend", rootOnly: true },
-  { op: "later", glyph: "⏳", tip: "later — pick a date", rootOnly: true },
-  { op: "zap", glyph: "⚡", tip: "quick task (≤15 min)", rootOnly: false },
-  { op: "done", glyph: "✓", tip: "done", rootOnly: false },
-  { op: "breakdown", glyph: "➕", tip: "break down", rootOnly: false },
+  { op: "zap", glyph: "⚡", tip: "quick task (≤15 min)" },
+  { op: "done", glyph: "✓", tip: "done" },
   // only shown while this bubble (or anything under it) changed this session
-  { op: "undo", glyph: "↺", tip: "undo this session's changes", rootOnly: false },
+  { op: "undo", glyph: "↺", tip: "undo this session's changes" },
 ] as const;
 type Op = (typeof OPS)[number]["op"];
 
@@ -171,8 +175,8 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 
 // A bare <input> reads to password managers as a login field, so they pop their
 // prompt over the bubble. This is the union of switches that silences all of them.
-function noAutofill(input: HTMLInputElement) {
-  if (!input.type) input.type = "text";
+function noAutofill(input: HTMLInputElement | HTMLTextAreaElement) {
+  if (input instanceof HTMLInputElement && !input.type) input.type = "text";
   input.autocomplete = "off";
   input.setAttribute("autocorrect", "off");
   input.setAttribute("autocapitalize", "off");
@@ -192,30 +196,30 @@ function makeBubbleShell() {
   const text = el("div", "text");
   const meta = el("div", "meta");
   const kids = el("div", "kids");
-  const row = el("div", "emoji-row");
-  const inv = el("div", "invite");
-  const input = el("input");
-  input.placeholder = "break it down…";
-  noAutofill(input);
-  inv.append(input, el("div", "hint", "↵ adds · esc closes"));
-  // The ⏳ panel is inline, not prompt(): a native modal blocks the thread and its
-  // Escape leaks to the window handler, collapsing the bubble being edited.
+  const row = el("div", "actions");
+  // The ＋ is drawn as the next subtask's empty place: last in `kids`, bubble-shaped.
+  const add = el("button", "add-kid", "+");
+  add.title = "add a subtask";
+  add.setAttribute("aria-label", "add a subtask");
+  // The date panel (dropping a root on the rim) is inline, not prompt(): a native modal
+  // blocks the thread and its Escape leaks to the window handler, collapsing the bubble.
   const pick = el("div", "datepick");
   const dinput = el("input");
   dinput.type = "date";
   noAutofill(dinput);
-  pick.append(dinput, el("div", "hint", "sets ⏳ · esc closes"));
+  pick.append(dinput, el("div", "hint", "pick a date · esc closes"));
   const btns = new Map<Op, HTMLButtonElement>();
   for (const op of OPS) {
-    const b = el("button", "emoji", op.glyph);
+    const b = el("button", "act", op.glyph);
     b.dataset.op = op.op;
     b.title = op.tip;
+    b.setAttribute("aria-label", op.tip);
     row.appendChild(b);
     btns.set(op.op, b);
   }
-  body.append(zap, text, meta, kids, inv, pick, row);
+  body.append(zap, text, meta, kids, pick, row);
   g.appendChild(body);
-  return { g, text, meta, kids, row, zap, input, inv, pick, dinput, btns };
+  return { g, text, meta, kids, row, zap, add, pick, dinput, btns };
 }
 
 export function mountDartboard(container: HTMLElement, ctx: ViewContext<DartboardTool>): () => void {
@@ -232,6 +236,9 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   // The focus is a CHAIN: opening a subtask leaves its parent open around it.
   let focusPath: string[] = [];
   let datePickFor: string | null = null;
+  // The open bubble that is getting a new subtask: the ＋ in it has become a bubble with
+  // a text box. It isn't a task until ↵. What has been typed lives in `nameBox`.
+  let namingIn: string | null = null;
   const gfx = new Map<string, Elems>();
   let tasksCache: Task[] = []; // the database, as last read
   let reorg = R.emptyReorg(); // the draft laid over it
@@ -335,6 +342,10 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
 
   /** Band, home and size for each root, from its date and the current focus. */
   function layout() {
+    if (namingIn) { // its bubble closed, was merged away, or is gone
+      const p = findNode(namingIn);
+      if (!p || !canDecompose(p) || !focusPath.includes(p.id)) { namingIn = null; nameBox.value = ""; }
+    }
     for (const n of nodes) {
       const band = bandOf(n);
       if (n.band && n.band !== band) n.travelUntil = performance.now() + TRAVEL_MS; // swims there
@@ -357,8 +368,16 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     if (stateOf(n) === "idle") return n.done ? D_DONE[d] : D_IDLE[d];
     // area-based pack: √(Σ kid areas) is the side of the square they'd tile;
     // ×1.7 is slack for flex-wrap gaps and the circle's unusable corners.
-    const area = n.children.reduce((a, k) => a + diamOf(k) ** 2, 0);
+    const area = n.children.reduce((a, k) => a + diamOf(k) ** 2, slotDiam(n) ** 2);
     return Math.max(D_OPEN[d], Math.sqrt(area) * 1.7 + CHROME[d]);
+  }
+
+  /** What follows an open bubble's subtasks: the ＋, the bubble being named, or nothing. */
+  const slotOf = (n: BNode): "add" | "naming" | null =>
+    !canDecompose(n) || datePickFor === n.id ? null : namingIn === n.id ? "naming" : "add";
+  function slotDiam(n: BNode) {
+    const slot = slotOf(n), d = Math.min(n.depth, SIZE_LEVELS);
+    return slot === "naming" ? D_NAMING[d] : slot === "add" ? D_ADD[d] : 0;
   }
 
   // ─── physics ─────────────────────────────────────────────────────────────────
@@ -463,8 +482,16 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     viewport.classList.remove("is-panning");
   }, on);
   window.addEventListener("keydown", e => {
-    if (e.key === "0" && document.activeElement?.tagName !== "INPUT") fitCam();
-    if (e.key === "Escape" && document.activeElement?.tagName !== "INPUT") stepOut();
+    if (/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName ?? "")) return;
+    if (e.key === "0") fitCam();
+    // the bubble being named is the innermost level, so esc leaves it first
+    if (e.key === "Escape") { if (namingIn) { endNaming(false); sync(); } else stepOut(); }
+    if ((e.key === "+" || e.key === "=") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const n = tail() ? findNode(tail()!) : null;
+      if (!n || !canDecompose(n)) return;
+      e.preventDefault(); // or the key lands in the text box it just opened
+      startNaming(n);
+    }
   }, on);
   window.addEventListener("resize", fitCam, on);
 
@@ -517,14 +544,8 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   }
 
   // ─── bubbles ─────────────────────────────────────────────────────────────────
-  // Date ops are root-only: a subtask has no band (it lives inside its parent), so
-  // a date set on one would be a change the board couldn't show you.
   // A merged group isn't a task yet, so it has no simple edits until the draft lands.
-  const opVisible = (n: BNode, op: (typeof OPS)[number]) =>
-    !n.synthetic &&
-    (!op.rootOnly || n.depth === 0) &&
-    (op.op !== "breakdown" || canDecompose(n)) &&
-    (op.op !== "undo" || n.pending);
+  const opVisible = (n: BNode, op: (typeof OPS)[number]) => !n.synthetic && (op.op !== "undo" || n.pending);
 
   function makeBubble(node: BNode): Elems {
     const e = makeBubbleShell();
@@ -544,18 +565,14 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     e.g.addEventListener("mousedown", ev => ev.stopPropagation()); // never starts a pan
     // Subtasks drag to reorganise; a closed root drags to a ring to reschedule it.
     e.g.addEventListener("pointerdown", ev => {
-      if (ev.button !== 0 || (ev.target as Element).closest("button, input")) return;
+      if (ev.button !== 0 || (ev.target as Element).closest("button, input, textarea")) return;
       const n = cur();
       if (n.depth === 0 && stateOf(n) !== "idle") return; // an open root is for reading
       ev.stopPropagation();
       drag = { id: n.id, el: e.g, x0: ev.clientX, y0: ev.clientY, started: false, root: n.depth === 0 };
     });
-    e.input.addEventListener("keydown", ev => {
-      ev.stopPropagation();
-      if (ev.key === "Enter" && e.input.value.trim()) { addChild(cur(), e.input.value.trim()); e.input.value = ""; }
-      else if (ev.key === "Escape") { e.input.blur(); stepOut(); }
-    });
-    e.input.addEventListener("click", ev => ev.stopPropagation());
+    e.add.addEventListener("click", ev => { ev.stopPropagation(); startNaming(cur()); });
+    e.add.addEventListener("mousedown", ev => ev.stopPropagation());
     e.dinput.addEventListener("keydown", ev => {
       ev.stopPropagation();
       if (ev.key === "Escape") { datePickFor = null; sync(); }
@@ -584,6 +601,13 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   // One click opens; clicking the open bubble again closes it.
   function onBubbleClick(n: BNode) {
     datePickFor = null;
+    if (namingIn) {
+      // A click away settles the bubble being named. On its own parent that is all the
+      // click does: there, a click would otherwise close the parent, or pop it.
+      const parent = namingIn;
+      endNaming();
+      if (n.id === parent) return sync();
+    }
     // The empty space of an open subtask with subtasks of its own pops that level.
     if (focusPath.includes(n.id) && n.depth > 0 && n.children.length) return doReorg(R.pop(baseMap(), reorg, n.id));
     if (tail() === n.id) return stepOut();
@@ -595,7 +619,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
 
   /** Out one level — an open subtask leaves you in its parent, not on the board. */
   function stepOut() { const was = focusPath[0]; focusPath = focusPath.slice(0, -1); datePickFor = null; sync(); if (was && !focusPath.length) sendHome(); }
-  function clearFocus() { const was = focusPath.length; focusPath = []; datePickFor = null; sync(); if (was) sendHome(); }
+  function clearFocus() { endNaming(); const was = focusPath.length; focusPath = []; datePickFor = null; sync(); if (was) sendHome(); }
   /** After an open bubble closes, the bubbles it pushed aside swim back. The overdue
    *  band usually holds more bubbles than fit, so its cluster is left to settle. */
   function sendHome() {
@@ -604,6 +628,67 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     kick();
   }
   function sync() { layout(); render(); kick(); syncHold(); }
+
+  // ─── naming a new subtask ────────────────────────────────────────────────────
+  // ＋ doesn't open a form. It becomes the new bubble, with a text box where its title
+  // will be, so the thing you name is the thing you get. ↵ makes it a task and offers
+  // the next one (breaking a task down is usually several steps); esc throws it away;
+  // clicking or dragging anything else keeps what was typed.
+  // One element for the whole board, since only one bubble is named at a time. It is
+  // moved between parents rather than rebuilt, so a refresh never loses half a title.
+  const namer = el("div", "bubble kid is-naming");
+  const nameBox = el("textarea", "name-box");
+  nameBox.rows = 1;
+  nameBox.placeholder = "name it…";
+  nameBox.setAttribute("aria-label", "name of the new subtask");
+  noAutofill(nameBox);
+  {
+    const body = el("div", "body");
+    body.appendChild(nameBox);
+    namer.appendChild(body);
+  }
+  /** What has been typed, as a title: one line, however it was pasted. */
+  const typedTitle = () => nameBox.value.replace(/\s+/g, " ").trim();
+  /** The box is as tall as its text, so the title stays centred in the bubble. */
+  const fitNameBox = () => { nameBox.style.height = "auto"; nameBox.style.height = `${nameBox.scrollHeight}px`; };
+  nameBox.addEventListener("input", fitNameBox);
+  nameBox.addEventListener("keydown", ev => {
+    ev.stopPropagation();
+    if (ev.key === "Escape") { endNaming(false); return sync(); }
+    if (ev.key !== "Enter" || ev.isComposing) return;
+    ev.preventDefault(); // a title is one line
+    const title = typedTitle();
+    if (!title || !namingIn) { endNaming(); return sync(); }
+    // The named bubble is the task: it shrinks into place from where it was typed.
+    const born = namer.getBoundingClientRect();
+    nameBox.value = "";
+    fitNameBox();
+    void run("create_task", { title, parent_id: namingIn }, born);
+  });
+  // Inside its parent's bubble, but not part of it: a press here must not open, close,
+  // pop or drag the parent.
+  for (const type of ["click", "mousedown", "pointerdown"] as const) {
+    namer.addEventListener(type, ev => { ev.stopPropagation(); if (type === "click") nameBox.focus(); });
+  }
+
+  function startNaming(n: BNode) {
+    if (namingIn === n.id) return nameBox.focus();
+    endNaming();
+    datePickFor = null;
+    namingIn = n.id;
+    sync();
+    if (!REDUCED) namer.animate([{ transform: "scale(.35)", opacity: 0 }, { transform: "none", opacity: 1 }], { duration: 260, easing: SPRING });
+  }
+
+  /** Stop naming. What was typed becomes a subtask, unless it is being thrown away.
+   *  The caller renders. */
+  function endNaming(keep = true) {
+    if (!namingIn) return;
+    const parent = namingIn, title = keep ? typedTitle() : "";
+    namingIn = null;
+    nameBox.value = "";
+    if (title) void run("create_task", { title, parent_id: parent });
+  }
 
   // ─── reorganising (a draft; see reorg.ts) ────────────────────────────────────
   const VOCABULARY =
@@ -683,6 +768,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   }
 
   function collapseAll() {
+    endNaming();
     const res = R.collapse(baseMap(), reorg);
     focusPath = [];
     datePickFor = null;
@@ -783,6 +869,11 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     if (drag.started && ev.buttons === 0) return cancelDrag(); // let go outside the window
     if (!drag.started) {
       if (Math.hypot(ev.clientX - drag.x0, ev.clientY - drag.y0) < 4) return;
+      if (namingIn) { // settle it first; subtask elements are rebuilt, so find ours again
+        endNaming();
+        sync();
+        drag.el = gfx.get(drag.id)?.g ?? drag.el;
+      }
       drag.started = true;
       // Regions are measured once, so measure where bubbles land, not mid-animation.
       for (const anim of container.getAnimations({ subtree: true })) anim.finish();
@@ -864,10 +955,11 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   }, on);
 
   // ─── rescheduling by dragging a root to a ring ───────────────────────────────
-  // The ring under the pointer sets the date, as the ☀️ ➡️ 📅 ⏳ buttons do. Within the
-  // month ring, distance from the centre picks the day. The angle is ignored: the bubble
-  // swims back to its own wedge. The overdue ring would mean a date in the past, so it
-  // refuses, and dropping off the board cancels.
+  // The ring under the pointer sets the date; this is the only way to set one. Today,
+  // tomorrow and weekend are due dates. Within the month ring, distance from the centre
+  // picks the day. The rim opens a date picker, for a scheduled (not due) date. The angle
+  // is ignored: the bubble swims back to its own wedge. The overdue ring would mean a
+  // date in the past, so it refuses, and dropping off the board cancels.
   type Schedule =
     | { band: Band; date: string; kind: "due" }
     | { band: "rim"; pick: true }
@@ -927,7 +1019,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       paint();
     }
     if ("refuse" in s) { if (s.band === "overdue") flash("can't schedule in the past"); return kick(); }
-    if ("pick" in s) { focusPath = [id]; datePickFor = id; return sync(); } // ⏳'s own picker
+    if ("pick" in s) { focusPath = [id]; datePickFor = id; return sync(); } // the date picker
     kick();
     await setDate(n, s.date, s.kind);
   }
@@ -947,6 +1039,8 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     for (const el of bubbles.querySelectorAll<HTMLElement>(".bubble[data-id]")) {
       out.set(el.dataset.id!, { el, rect: override?.get(el.dataset.id!) ?? el.getBoundingClientRect() });
     }
+    // a bubble that wasn't drawn yet but has somewhere to come from (it was just named)
+    for (const [id, rect] of override ?? []) if (!out.has(id)) out.set(id, { el: document.createElement("div"), rect });
     return out;
   }
   const centre = (r: DOMRect) => ({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
@@ -1006,7 +1100,8 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   }
 
   // ─── writing ─────────────────────────────────────────────────────────────────
-  async function run(tool: Exclude<DartboardTool, "undo_edit">, args: Record<string, unknown>) {
+  /** `born`: where on screen the task this creates should appear from. */
+  async function run(tool: Exclude<DartboardTool, "undo_edit">, args: Record<string, unknown>, born?: DOMRect) {
     let edit: Edit;
     try {
       edit = await ctx.dispatch(tool, args, { correlationId: session.id });
@@ -1016,7 +1111,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     }
     session.staged.push({ seq: edit.seq, type: edit.type, targets: edit.targets });
     saveSession();
-    await refresh();
+    await refresh(born && edit.task_id ? new Map([[edit.task_id, born]]) : undefined);
   }
 
   /** Undo this session's edits that match, newest first. Stops at the first conflict. */
@@ -1049,21 +1144,12 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       const ids = new Set(subtreeIds(n));
       return void undoStaged(s => s.targets.some(t => ids.has(t)));
     }
-    if (op === "today") return setDate(n, fmt(today), "due");
-    if (op === "tomorrow") return setDate(n, fmt(tomorrow), "due");
-    if (op === "weekend") return setDate(n, fmt(nextSat), "due");
     if (op === "zap") {
       return n.zap
         ? run("unset_attributes", { task_id: n.id, keys: ["quick"] })
         : run("set_attributes", { task_id: n.id, attrs: { quick: true } });
     }
     if (op === "done") return n.done ? undefined : run("complete_task", { task_id: n.id });
-    if (op === "breakdown") { focusPath = [...n.chain]; datePickFor = null; return sync(); }
-    if (op === "later") { datePickFor = datePickFor === n.id ? null : n.id; sync(); }
-  }
-
-  function addChild(n: BNode, text: string) {
-    return run("create_task", { title: text, parent_id: n.id });
   }
 
   function flash(msg: string, kind: "error" | "info" = "error") {
@@ -1087,7 +1173,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     flip(before);
   }
 
-  const dateLabel = (n: BNode) => `${n.dateType === "scheduled" ? "⏳" : "📅"} ${n.date ? short(n.date) : "—"}`;
+  const dateLabel = (n: BNode) => (n.date ? `${n.dateType === "scheduled" ? "⏳" : "📅"} ${short(n.date)}` : "no date");
 
   function paintBubble(n: BNode, e: Elems | undefined) {
     if (!e) return;
@@ -1100,21 +1186,19 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       `${n.drafted ? " is-drafted" : ""}${n.synthetic ? " is-synthetic" : ""}`;
     e.g.dataset.id = n.id;
     e.text.textContent = n.text;
-    e.zap.style.display = n.zap ? "block" : "none";
-    e.meta.style.display = st === "idle" ? "none" : "block";
-    const subs = n.children.length ? `${n.children.length} sub` : "no subtasks";
-    e.meta.textContent = isRoot
-      ? `${n.section || "—"} · ${dateLabel(n)}`
-      : `${subs}${n.date ? ` · ${dateLabel(n)}` : ""}`;
+    e.zap.style.display = n.zap && st === "idle" ? "block" : "none"; // open, the ⚡ control shows it
+    // Only what isn't already on show: an open bubble's subtasks are right there.
+    const meta = isRoot ? [n.section, dateLabel(n)] : [n.date ? dateLabel(n) : ""];
+    e.meta.textContent = meta.filter(Boolean).join(" · ");
+    e.meta.style.display = st === "idle" || !e.meta.textContent ? "none" : "block";
     e.g.title = isRoot
       ? `${n.text}\n${n.section || "—"} · ${dateLabel(n)}\n${n.children.length ? n.children.length + " subtasks" : "not broken down"}`
       : `${n.text}\n${n.children.length ? n.children.length + " subtasks" : "not broken down"}`;
 
-    for (const op of OPS) e.btns.get(op.op)!.style.display = opVisible(n, op) ? "block" : "none";
+    for (const op of OPS) e.btns.get(op.op)!.style.display = opVisible(n, op) ? "" : "none";
     e.btns.get("zap")!.classList.toggle("is-on", n.zap);
-    e.btns.get("later")!.classList.toggle("is-on", datePickFor === n.id);
+    e.btns.get("done")!.classList.toggle("is-on", n.done);
 
-    e.inv.style.display = st === "open" && canDecompose(n) && datePickFor !== n.id ? "block" : "none";
     e.pick.style.display = datePickFor === n.id ? "block" : "none";
     if (datePickFor === n.id && !e.dinput.value) e.dinput.value = fmt(addDays(today, 31));
 
@@ -1128,17 +1212,26 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
         paintBubble(k, ke);
         ke.g.style.width = ke.g.style.height = diamOf(k) + "px";
       }
+      const slot = slotOf(n), tile = slot === "naming" ? namer : slot === "add" ? e.add : null;
+      if (tile) {
+        tile.style.width = tile.style.height = slotDiam(n) + "px";
+        if (tile === namer) namer.className = `bubble kid is-naming is-d${Math.min(n.depth + 1, SIZE_LEVELS)}`;
+        e.kids.appendChild(tile);
+      }
     }
   }
 
-  /** Every render destroys the focused input — put the caret back on the tail's. */
+  /** A render takes the focused field out of the document; put the caret back. */
   function restoreCaret() {
-    const t = tail();
-    if (!t) return;
-    const n = findNode(t), e = gfx.get(t);
-    if (!n || !e) return;
-    if (datePickFor === t) return void requestAnimationFrame(() => e.dinput.focus());
-    if (canDecompose(n)) requestAnimationFrame(() => e.input.focus());
+    if (namingIn) {
+      // At once, not on the next frame: a key pressed in between would go nowhere.
+      if (!namer.isConnected) return;
+      fitNameBox();
+      if (document.activeElement !== nameBox) nameBox.focus({ preventScroll: true });
+      return;
+    }
+    const t = tail(), e = t ? gfx.get(t) : undefined;
+    if (e && datePickFor === t) requestAnimationFrame(() => e.dinput.focus());
   }
 
   // per-frame: positions only (roots only — kids are laid out by flexbox inside them)
@@ -1167,7 +1260,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     }
     const pops = reorg.memory.filter(m => !m.forgotten).length;
     if (pops) hud.append(el("div", "draft", `${pops} popped · collapse brings back ${R.wouldRestore(baseMap(), reorg).size}`));
-    hud.append(el("div", "keys", "click to open · click a subtask to go deeper · esc backs out · scroll to zoom · 0 to fit"));
+    hud.append(el("div", "keys", "click to open · click a subtask to go deeper · ＋ adds a subtask · esc backs out · scroll to zoom · 0 to fit"));
     hud.append(el("div", "keys", "drag a bubble to a ring to reschedule · drag a subtask onto another to merge · click an open subtask's space to pop it"));
   }
 
@@ -1199,6 +1292,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     sectionOptions.replaceChildren(...sections.map(s => { const o = el("option"); o.value = s; return o; }));
   }
   function openAddPanel() {
+    if (namingIn) { endNaming(); sync(); } // or the next render would take the caret back
     addTaskOpen = true;
     refreshSectionOptions();
     paintToolbar();
@@ -1298,9 +1392,9 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     raf = requestAnimationFrame(loop);
   }
 
-  async function refresh() {
+  async function refresh(from?: Map<string, DOMRect>) {
     tasksCache = (await ctx.tasks()).tasks;
-    rebuildFromDraft();
+    rebuildFromDraft(from);
   }
 
   // ─── boot ────────────────────────────────────────────────────────────────────

@@ -3,9 +3,30 @@
 A living log: what's done, what's next, known problems, and ideas not yet scheduled.
 Design decisions themselves go in `docs/adr/`. This file is for everything around them.
 
-_Last updated: 2026-11-23 · branch `bubble-drafts`_
+_Last updated: 2026-11-24 · branch `bubble-redesign`_
 
 ## Done
+
+### Dartboard: fewer controls, and ＋ makes the bubble you name
+- **Why.** Once roots could be dragged to a ring, the four date buttons (☀️ ➡️ 📅 ⏳) said
+  nothing a drag doesn't. The "break it down…" text box sat in every open bubble whether or
+  not anything was being added.
+- **Controls.** An open bubble now has ⚡ and ✓, plus ↺ once something under it has changed.
+  They are small circles, and ⚡ is grey until it is on.
+- **Dates** are set only by dragging a root to a ring. The rim still opens the inline date
+  picker (a scheduled date).
+- **Adding a subtask.** A dashed ＋ sits after an open bubble's subtasks, at every open
+  level. Pressing it (or the `+` key) turns it into a bubble with a text box where the
+  title will be:
+  - ↵ creates the subtask, which shrinks into place from the bubble it was typed in, and
+    an empty bubble is ready for the next one;
+  - esc throws it away (a second esc backs out of the parent, as before);
+  - clicking or dragging anything else keeps what was typed. A click on the parent's own
+    space only does that: it doesn't also close or pop the parent.
+- **Smaller open bubbles,** since they hold less: 300 / 210 / 156 at rest, was 340 / 230 / 165.
+- **Nothing else changed.** Same edits (`create_task`, `set_attributes`, …), same API, no
+  migration. The top-right "+ add" panel for new root tasks is as it was: a root needs a
+  category, and there is no gesture for that yet (see "Drag across wedges" below).
 
 ### Reorganisation drafts (ADR 0003)
 - **Two ways to write.** Simple edits (date, ⚡, ✓, add a subtask) go straight to
@@ -43,9 +64,9 @@ _Last updated: 2026-11-23 · branch `bubble-drafts`_
     arrives, for at most 8s. Neighbours it bumps, and those pushed aside by an open
     bubble, swim home too.
 - **Drag to reschedule.** Drag a closed root onto a ring:
-  - today, tomorrow and weekend set the same dates as the buttons;
+  - today, tomorrow and weekend set a due date;
   - the month ring maps distance from the centre to a day;
-  - the rim opens ⏳'s date picker;
+  - the rim opens the date picker (a scheduled date);
   - the overdue ring refuses.
 - **After the drop,** the bubble swims back to its own wedge, and a label shows the date
   while dragging.
