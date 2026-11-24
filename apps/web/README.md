@@ -25,6 +25,13 @@ same path agent tools will use. Pick a view with `?view=<id>`.
   today, tomorrow and weekend are due dates, distance across the month ring picks the day,
   and the rim opens a date picker for a scheduled date (⏳). The overdue ring refuses. The
   bubble swims back to its own wedge.
+  A root sits at its earliest open deadline: its own due date, or a subtask's (at any
+  depth) if that is sooner. Done subtasks and scheduled dates don't count. The weekend
+  ring runs to the end of Sunday.
+  By default only what is due by the end of the coming weekend is drawn. "show later" (or
+  `L`) brings back the month and later rings, undated tasks included; the choice lasts for
+  the tab. A later task that is open, or was changed this session, stays on the board
+  (faded) either way. Hidden bubbles keep their place, so the toggle moves nothing.
   Physics cools (d3-force style) so the board always comes to rest; a bubble that is
   swimming home keeps it warm until it arrives, for at most 8s.
 

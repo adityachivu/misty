@@ -3,9 +3,26 @@
 A living log: what's done, what's next, known problems, and ideas not yet scheduled.
 Design decisions themselves go in `docs/adr/`. This file is for everything around them.
 
-_Last updated: 2026-11-24 · branch `bubble-redesign`_
+_Last updated: 2026-11-24 · branch `main`_
 
 ## Done
+
+### Dartboard: the short view, and deadlines from subtasks
+- **Short view by default.** Only roots due by the end of the coming weekend are drawn.
+  The month and later rings (so undated and scheduled tasks too) are hidden until "show
+  later" or `L`. The button says how many there are. The choice is kept per tab.
+  - A later task that is open, changed this session, or moved by the draft stays on the
+    board, faded: ↺ has to be able to reach it, and a new root starts undated.
+  - Hidden bubbles stay in the simulation, so the toggle never moves anything.
+  - The rings themselves are still drawn, so a task can be dragged out to them.
+- **A root sits at its earliest open deadline:** its own due date, or a subtask's at any
+  depth if that is sooner. Before, only the root's own date counted. Done subtasks and
+  scheduled dates don't count. An open root's meta says "subtask due MM-DD" when that is
+  what places it, and dropping it on a later ring sets its date but says why it stays.
+- **The weekend ring runs to the end of Sunday** (it stopped at Saturday, so a Sunday
+  task sat in the month ring). Dropping on it still means Saturday; the month ring now
+  starts on the Monday.
+- View only: no new edits, API or migration.
 
 ### Dartboard: fewer controls, and ＋ makes the bubble you name
 - **Why.** Once roots could be dragged to a ring, the four date buttons (☀️ ➡️ 📅 ⏳) said

@@ -4,6 +4,10 @@
 // ⚡ = quick task. Geometry, physics and the focus chain are unchanged from the
 // original; see its README for why they look the way they do.
 //
+// A root sits at its earliest open deadline: its own due date, or a subtask's if that
+// is sooner. By default the board shows only what is due by the end of the coming
+// weekend; "show later" (or L) brings back the month and later rings.
+//
 // An open bubble carries only what dragging can't do: ⚡, ✓, and (once something has
 // changed) ↺. Dates are set by dragging a root to a ring. Subtasks are added with the ＋
 // at the end of an open bubble's subtasks: it becomes a bubble you type the name into.
@@ -89,6 +93,8 @@ const REHEAT = 0.6;
 const TRAVEL_HEAT = 0.3, TRAVEL_MS = 8000;
 const MAX_SPEED = 14; // px/frame: an opening bubble shoves neighbours, it doesn't fling them
 const ZOOM_MIN = 0.25, ZOOM_MAX = 4;
+// Past the coming weekend, or undated. Not drawn unless asked for (see isHidden).
+const LATER: ReadonlySet<Band> = new Set<Band>(["month", "rim"]);
 
 // ─── dates (local — toISOString is UTC and rolls over at the wrong hour) ──────
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -106,6 +112,8 @@ interface BNode {
   section: string;
   date: Date | null;
   dateType: "due" | "scheduled" | null;
+  /** Whoever holds the earliest open due date at or under this node (maybe itself). */
+  deadline: BNode | null;
   zap: boolean;
   done: boolean;
   pending: boolean; // changed this session, here or below
@@ -128,6 +136,13 @@ interface Root extends BNode {
 interface Staged { seq: number; type: string; targets: string[] }
 
 const SESSION_KEY = "misty.dartboard.session";
+const LATER_KEY = "misty.dartboard.showLater";
+
+/** The earliest due date among `ns`. On a tie the first one keeps it. */
+const earliest = (ns: (BNode | null)[]) =>
+  ns.reduce<BNode | null>((a, c) => (c?.date && (!a || c.date < a.date!) ? c : a), null);
+/** The earliest open due date strictly under `n`. */
+const deadlineBelow = (n: BNode) => earliest(n.children.filter(c => !c.done).map(c => c.deadline));
 
 type Elems = ReturnType<typeof makeBubbleShell>;
 
@@ -153,6 +168,7 @@ const TEMPLATE = `
       <button id="collapseBtn" class="tool-btn" title="close everything and bring back popped groups whose parts are untouched" hidden>collapse</button>
       <button id="discardDraftBtn" class="tool-btn" title="throw away this reorganisation" hidden>✕ discard</button>
       <button id="applyBtn" class="tool-btn" title="apply this reorganisation now" hidden>✓ apply now</button>
+      <button id="laterBtn" class="tool-btn" title="show or hide tasks past the coming weekend (L)">show later</button>
       <button id="addBtn" class="tool-btn" title="add a task">+ add</button>
       <button id="resetBtn" class="tool-btn" title="undo every change made this session" hidden>↺ reset all</button>
     </div>
@@ -243,7 +259,9 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   let tasksCache: Task[] = []; // the database, as last read
   let reorg = R.emptyReorg(); // the draft laid over it
   const baseMap = () => new Map(tasksCache.map(t => [t.id, t]));
-  let today = new Date(), tomorrow = today, nextSat = today, monthOut = today;
+  let today = new Date(), tomorrow = today, nextSat = today, weekendEnd = today, monthOut = today;
+  // Per tab, like the session: a new tab starts with the short view.
+  let showLater = (() => { try { return sessionStorage.getItem(LATER_KEY) === "1"; } catch { return false; } })();
 
   const session: { id: string; staged: Staged[] } = (() => {
     try {
@@ -258,20 +276,31 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     today = new Date(); today.setHours(0, 0, 0, 0);
     tomorrow = addDays(today, 1);
     nextSat = addDays(today, (6 - today.getDay() + 7) % 7); // 0 if today is Saturday
+    weekendEnd = addDays(nextSat, 1); // its Sunday. On a Sunday, that is next week's
     monthOut = addDays(today, 31);
   }
 
   // First match wins, so bands collapse gracefully (on a Saturday, `today` wins).
+  // A root goes where its earliest open deadline is, and that may be a subtask's: a task
+  // with a step due tomorrow needs attention tomorrow, whatever its own date says.
   function bandOf(n: BNode): Band {
-    if (n.dateType === "scheduled" || !n.date) return "rim"; // intention, not deadline
-    const d = n.date;
+    const d = n.deadline?.date;
+    if (!d) return "rim"; // no deadline. A scheduled date is an intention, not one
     if (d < today) return "overdue";
     if (+d === +today) return "today";
     if (+d === +tomorrow) return "tomorrow";
-    if (d <= nextSat) return "weekend";
+    if (d <= weekendEnd) return "weekend";
     if (d <= monthOut) return "month";
     return "rim";
   }
+
+  /** Past the coming weekend, and not asked for. Some stay on the board anyway: an open
+   *  one (it is being read), and, faded, one changed this session or by the draft (↺ has
+   *  to be able to reach it, and a new task starts undated, so it would vanish as it is
+   *  made). A hidden bubble keeps its place in the simulation, so showing it moves nothing. */
+  const isLater = (n: Root) => !showLater && LATER.has(n.band);
+  const draftedWithin = (n: BNode): boolean => n.drafted || n.children.some(draftedWithin);
+  const isHidden = (n: Root) => isLater(n) && !n.pending && !focusPath.includes(n.id) && !draftedWithin(n);
 
   const tail = () => focusPath[focusPath.length - 1] ?? null;
   const stateOf = (n: BNode) => (focusPath.includes(n.id) ? "open" : "idle");
@@ -306,6 +335,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
         category: typeof a.category === "string" ? a.category : null,
         section: typeof a.section === "string" ? a.section : "",
         date, dateType: date ? (a.date_kind === "scheduled" ? "scheduled" : "due") : null,
+        deadline: null,
         zap: a.quick === true, done: t.state === "done", pending: false,
         synthetic: R.isNew(t.id), drafted: reorg.nodes.has(t.id),
         chain: [...parentChain, t.id], children: [],
@@ -315,6 +345,8 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
           .map(k => makeNode(k, depth + 1, node.chain));
       }
       node.pending = touched.has(t.id) || node.children.some(c => c.pending);
+      // Done subtasks (and what is under them) no longer have a deadline to meet.
+      node.deadline = earliest([node.dateType === "due" ? node : null, deadlineBelow(node)]);
       return node;
     };
 
@@ -484,6 +516,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   window.addEventListener("keydown", e => {
     if (/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName ?? "")) return;
     if (e.key === "0") fitCam();
+    if ((e.key === "l" || e.key === "L") && !e.metaKey && !e.ctrlKey && !e.altKey) setShowLater(!showLater);
     // the bubble being named is the innermost level, so esc leaves it first
     if (e.key === "Escape") { if (namingIn) { endNaming(false); sync(); } else stepOut(); }
     if ((e.key === "+" || e.key === "=") && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -853,7 +886,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     for (const [nid, e] of gfx) {
       if (own.has(nid) || !e.g.isConnected) continue;
       const n = findNode(nid);
-      if (!n) continue;
+      if (!n || (n.depth === 0 && isHidden(n as Root))) continue; // nothing there to drop on
       if (n.depth === 0 && n.chain[0] !== x.chain[0]) blocks.push(circle("block", nid, e.g));
       else if (!focusPath.includes(nid) && n.depth > 0 && R.canJoin(t, id, nid)) merges.push(circle("merge", nid, e.g, 4));
     }
@@ -985,7 +1018,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     // month: inner edge = the day after the weekend, outer edge = a month out
     const [r0, r1] = BAND.month;
     const f = Math.min(1, Math.max(0, (r - r0) / (r1 - r0)));
-    const first = addDays(nextSat, 1);
+    const first = addDays(weekendEnd, 1);
     const span = Math.round((+monthOut - +first) / 86400000);
     return { band, date: fmt(addDays(first, Math.round(f * span))), kind: "due" };
   }
@@ -1107,11 +1140,12 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
       edit = await ctx.dispatch(tool, args, { correlationId: session.id });
     } catch (e) {
       flash(e instanceof CommandRejected ? `rejected: ${e.message}` : String(e));
-      return;
+      return false;
     }
     session.staged.push({ seq: edit.seq, type: edit.type, targets: edit.targets });
     saveSession();
     await refresh(born && edit.task_id ? new Map([[edit.task_id, born]]) : undefined);
+    return true;
   }
 
   /** Undo this session's edits that match, newest first. Stops at the first conflict. */
@@ -1133,9 +1167,14 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     return undone;
   }
 
-  function setDate(n: BNode, value: string, kind: "due" | "scheduled") {
+  async function setDate(n: BNode, value: string, kind: "due" | "scheduled") {
     if (n.date && fmt(n.date) === value && n.dateType === kind) return; // already there
-    return run("set_attributes", { task_id: n.id, attrs: { date: value, date_kind: kind } });
+    if (!(await run("set_attributes", { task_id: n.id, attrs: { date: value, date_kind: kind } }))) return;
+    // The date is set, but the bubble swims back if a subtask is due sooner. Say why.
+    const sub = deadlineBelow(n);
+    if (sub && (kind === "scheduled" || sub.date! < toDate(value))) {
+      flash(`date set · still placed by its subtask "${sub.text}", due ${short(sub.date!)}`, "info");
+    }
   }
 
   async function onOp(n: BNode, op: Op) {
@@ -1174,25 +1213,30 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   }
 
   const dateLabel = (n: BNode) => (n.date ? `${n.dateType === "scheduled" ? "⏳" : "📅"} ${short(n.date)}` : "no date");
+  /** For a root placed by a subtask's deadline rather than its own date: which one. */
+  const placedBy = (n: BNode) => (n.deadline && n.deadline !== n ? `subtask due ${short(n.deadline.date!)}` : "");
 
   function paintBubble(n: BNode, e: Elems | undefined) {
     if (!e) return;
     const st = stateOf(n);
     const isRoot = n.depth === 0;
     const band = isRoot ? (n as Root).band : null;
+    const hidden = isRoot && isHidden(n as Root);
+    const faded = isRoot && !hidden && isLater(n as Root) && st === "idle";
     e.g.className = `bubble${isRoot ? "" : " kid is-d" + Math.min(n.depth, SIZE_LEVELS)}` +
       `${n.children.length ? " has-kids" : ""}${band === "overdue" ? " is-overdue" : ""}` +
       `${st !== "idle" ? " is-" + st : ""}${n.pending ? " is-pending" : ""}${n.done ? " is-done" : ""}` +
-      `${n.drafted ? " is-drafted" : ""}${n.synthetic ? " is-synthetic" : ""}`;
+      `${n.drafted ? " is-drafted" : ""}${n.synthetic ? " is-synthetic" : ""}` +
+      `${hidden ? " is-hidden" : ""}${faded ? " is-later" : ""}`;
     e.g.dataset.id = n.id;
     e.text.textContent = n.text;
     e.zap.style.display = n.zap && st === "idle" ? "block" : "none"; // open, the ⚡ control shows it
     // Only what isn't already on show: an open bubble's subtasks are right there.
-    const meta = isRoot ? [n.section, dateLabel(n)] : [n.date ? dateLabel(n) : ""];
+    const meta = isRoot ? [n.section, dateLabel(n), placedBy(n)] : [n.date ? dateLabel(n) : ""];
     e.meta.textContent = meta.filter(Boolean).join(" · ");
     e.meta.style.display = st === "idle" || !e.meta.textContent ? "none" : "block";
     e.g.title = isRoot
-      ? `${n.text}\n${n.section || "—"} · ${dateLabel(n)}\n${n.children.length ? n.children.length + " subtasks" : "not broken down"}`
+      ? `${n.text}\n${[n.section || "—", dateLabel(n), n.deadline && n.deadline !== n ? `placed by "${n.deadline.text}", due ${short(n.deadline.date!)}` : ""].filter(Boolean).join(" · ")}\n${n.children.length ? n.children.length + " subtasks" : "not broken down"}`
       : `${n.text}\n${n.children.length ? n.children.length + " subtasks" : "not broken down"}`;
 
     for (const op of OPS) e.btns.get(op.op)!.style.display = opVisible(n, op) ? "" : "none";
@@ -1246,11 +1290,13 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   }
 
   function drawHud() {
-    const counts = nodes.reduce<Partial<Record<Band, number>>>((a, n) => ((a[n.band] = (a[n.band] ?? 0) + 1), a), {});
+    const shown = nodes.filter(n => !isHidden(n)), hiddenN = nodes.length - shown.length;
+    const counts = shown.reduce<Partial<Record<Band, number>>>((a, n) => ((a[n.band] = (a[n.band] ?? 0) + 1), a), {});
     const changed = session.staged.length;
     hud.replaceChildren();
-    hud.append(el("div", "count", `${nodes.length} root tasks · ${fmt(today)}`));
+    hud.append(el("div", "count", `${hiddenN ? `${shown.length} of ${nodes.length}` : nodes.length} root tasks · ${fmt(today)}`));
     hud.append(el("div", "bands", (Object.keys(BAND) as Band[]).filter(b => counts[b]).map(b => `${BAND_LBL[b]} ${counts[b]}`).join(" · ")));
+    if (hiddenN) hud.append(el("div", "later", `${hiddenN} past the weekend or undated, hidden · L shows them`));
     if (changed) hud.append(el("div", "pending", `${changed} change${changed === 1 ? "" : "s"} this session · ↺ undoes`));
     if (draftId || !R.isNoop(reorg)) {
       const left = draftDue === null ? null : Math.max(0, Math.ceil((draftDue - performance.now()) / 1000));
@@ -1260,7 +1306,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     }
     const pops = reorg.memory.filter(m => !m.forgotten).length;
     if (pops) hud.append(el("div", "draft", `${pops} popped · collapse brings back ${R.wouldRestore(baseMap(), reorg).size}`));
-    hud.append(el("div", "keys", "click to open · click a subtask to go deeper · ＋ adds a subtask · esc backs out · scroll to zoom · 0 to fit"));
+    hud.append(el("div", "keys", "click to open · click a subtask to go deeper · ＋ adds a subtask · esc backs out · scroll to zoom · 0 to fit · L shows later"));
     hud.append(el("div", "keys", "drag a bubble to a ring to reschedule · drag a subtask onto another to merge · click an open subtask's space to pop it"));
   }
 
@@ -1273,6 +1319,8 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   const sectionOptions = $("sectionOptions");
   const collapseBtn = $<HTMLButtonElement>("collapseBtn");
   const applyBtn = $<HTMLButtonElement>("applyBtn"), discardDraftBtn = $<HTMLButtonElement>("discardDraftBtn");
+  const laterBtn = $<HTMLButtonElement>("laterBtn");
+  laterBtn.addEventListener("click", () => setShowLater(!showLater), on);
   collapseBtn.addEventListener("click", collapseAll, on);
   applyBtn.addEventListener("click", () => void applyNow(), on);
   discardDraftBtn.addEventListener("click", () => void discardDraft(), on);
@@ -1341,7 +1389,23 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     flash(`undid ${undone} change${undone === 1 ? "" : "s"}`);
   });
 
+  /** Show or hide what is past the coming weekend. Only what is drawn changes. */
+  function setShowLater(show: boolean) {
+    const was = new Set(nodes.filter(isHidden).map(n => n.id));
+    showLater = show;
+    try { sessionStorage.setItem(LATER_KEY, show ? "1" : "0"); } catch { /* private mode */ }
+    render();
+    if (REDUCED) return;
+    for (const n of nodes) {
+      if (was.has(n.id) && !isHidden(n)) gfx.get(n.id)?.g.animate([{ opacity: 0 }, {}], { duration: 220, easing: "ease-out" });
+    }
+  }
+
   function paintToolbar() {
+    const later = nodes.filter(n => LATER.has(n.band)).length;
+    laterBtn.textContent = showLater ? "hide later" : later ? `show later · ${later}` : "show later";
+    laterBtn.setAttribute("aria-pressed", String(showLater));
+    laterBtn.classList.toggle("is-on", showLater);
     addPanel.hidden = !addTaskOpen;
     addBtn.textContent = addTaskOpen ? "× close" : "+ add";
     for (const b of catRow.children) b.classList.toggle("is-selected", (b as HTMLElement).dataset.cat === selectedCategory);
@@ -1425,7 +1489,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     pending: n.pending, children: n.children.map(summarise),
   });
   const w = window as unknown as Record<string, unknown>;
-  w.__state = () => nodes.map(n => ({ ...summarise(n), band: n.band, category: n.category, dateType: n.dateType }));
+  w.__state = () => nodes.map(n => ({ ...summarise(n), band: n.band, category: n.category, dateType: n.dateType, hidden: isHidden(n) }));
   w.__focus = () => ({ path: [...focusPath] });
   w.__session = () => ({ id: session.id, staged: session.staged.map(s => ({ ...s })) });
   w.__physics = () => ({ running: raf !== null, frames: physFrames });

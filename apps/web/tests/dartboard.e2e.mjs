@@ -61,6 +61,14 @@ await create("alpha", {}, pair);
 await create("bravo", {}, pair);
 await create("charlie", {}, trio);
 await create("delta", {}, lab);
+// deadlines: a root sits at its earliest open due date, its own or a subtask's
+const report = await create("ship the report", { category: "work", date: "2026-08-20", date_kind: "due" });
+await create("draft it", { date: "2026-07-17", date_kind: "due" }, report);
+await create("polish it", { date: "2026-07-30", date_kind: "due" }, report);
+const archive = await create("archive the notes", { category: "uni" });
+await command("complete_task", { task_id: await create("find the box", { date: "2026-07-15", date_kind: "due" }, archive) });
+await create("call home", { category: "admin", date: "2026-07-19", date_kind: "due" }); // the Sunday
+await create("renew passport", { category: "admin", date: "2026-07-20", date_kind: "due" }); // the Monday after
 
 // ── checks ───────────────────────────────────────────────────────────────────
 let fails = 0;
@@ -132,9 +140,37 @@ const bands = Object.fromEntries((await state()).map(n => [n.text, n.band]));
 check("bands from date/date_kind", bands, {
   "understand evaluations": "today", "gemma 4 project": "rim", "pay rent": "overdue",
   "plan exam prep": "tomorrow", "captured by an agent": "rim", "reorg lab": "rim",
+  // its own date is a month out, but a subtask is due on Friday
+  "ship the report": "weekend",
+  "archive the notes": "rim", // a done subtask's date no longer counts
+  "call home": "weekend", "renew passport": "month", // the weekend runs to the end of Sunday
 });
 check("every categorised bubble sits in its wedge and band", await page.evaluate(() => window.__audit()), []);
+
+// by default only what is due by the end of the coming weekend is drawn
+const hiddenOnes = async () => (await state()).filter(n => n.hidden).map(n => n.text).sort();
+const LATER_ONES = ["archive the notes", "captured by an agent", "gemma 4 project", "renew passport", "reorg lab"];
+check("tasks past the weekend, and undated ones, start hidden", await hiddenOnes(), LATER_ONES);
+check("...not drawn at all", await page.locator("#bubbles > .bubble:visible").count(), (await state()).length - LATER_ONES.length);
+check("...and the toggle says how many", await page.innerText("#laterBtn"), `show later · ${LATER_ONES.length}`);
 await shot("1-boot");
+
+// a date dropped later than a subtask's deadline is kept, but the bubble stays put
+await dragRoot("ship the report", await boardPoint(700, -45));
+check("a root's own date can still be set", await until(async () => (await dbTask("ship the report")).attrs.date === "2026-08-15"), true);
+check("...but it stays where its earliest subtask is due", (await nodeOf("ship the report")).band, "weekend");
+check("...and says why", (await page.innerText("#flash")).includes('subtask "draft it", due 07-17'), true);
+await clickBubble(await rootBubble("ship the report"));
+check("its meta names the subtask deadline", (await (await rootBubble("ship the report")).locator("> .body > .meta").innerText()).includes("subtask due 07-17"), true);
+await page.keyboard.press("Escape");
+
+await atRest(); // the dropped bubble swims home first
+const places = () => page.evaluate(() => [...document.querySelectorAll("#bubbles > .bubble")].map(e => e.style.transform));
+const placesBefore = await places();
+await page.click("#laterBtn");
+check("show later brings them back", [await hiddenOnes(), await page.innerText("#laterBtn")], [[], "hide later"]);
+check("...without moving anything", [await places(), await page.evaluate(() => window.__physics().running)], [placesBefore, false]);
+await shot("1-later");
 
 // one click opens: subtasks, the ＋, and the few controls a drag can't replace
 const evalsB = await rootBubble("understand evaluations");
@@ -243,6 +279,12 @@ await page.keyboard.type("fix the tap");
 await page.keyboard.press("Enter");
 check("+ add creates a root with category/section", await until(async () => (await dbTask("fix the tap"))?.attrs.section === "Home"), true);
 check("...on the rim, in the admin wedge", await until(async () => (await nodeOf("fix the tap"))?.band === "rim"), true);
+// hidden again, what changed this session stays (faded), so ↺ can still reach it
+await page.keyboard.press("Escape");
+await page.keyboard.press("l");
+check("L hides later tasks again, except those changed here", [(await nodeOf("fix the tap")).hidden, (await nodeOf("captured by an agent")).hidden], [false, true]);
+check("...which are faded", await (await rootBubble("fix the tap")).evaluate(e => e.classList.contains("is-later")), true);
+await page.keyboard.press("l");
 
 // drag a root to a ring to reschedule it; it swims back to its own wedge
 await page.keyboard.press("Escape");
@@ -264,6 +306,7 @@ await page.keyboard.press("Escape");
 await page.reload();
 await page.waitForSelector("#viewport[data-ready]");
 check("after reload, changed tasks still carry the halo", (await nodeOf("pay rent")).pending, true);
+check("...and later tasks are still shown", [await hiddenOnes(), await page.innerText("#laterBtn")], [[], "hide later"]);
 check("reset all is offered", await page.isVisible("#resetBtn"), true);
 await shot("4-before-reset");
 
@@ -333,10 +376,14 @@ check("the board shows the database again", await until(async () => !(await page
 // pulling a subtask out onto the empty board makes it a root, in the same wedge
 await clickBubble(await rootBubble("reorg lab"));
 await clickBubble(kidBubble("ab-pair"));
+await page.keyboard.press("l"); // with later tasks hidden, a pulled-out (undated) one must not vanish
 await dragTo(kidBubble("alpha"), { x: 60, y: 940 });
 check("alpha is a root in the draft", (await state()).some(n => n.text === "alpha"), true);
+check("...drawn, though it is undated and later tasks are hidden", [(await nodeOf("alpha")).hidden, (await nodeOf("captured by an agent")).hidden], [false, true]);
 await page.click("#applyBtn");
 check("apply now writes it", await until(async () => (await dbTask("alpha")).parent_id === null), true);
+check("...and it stays drawn", (await nodeOf("alpha")).hidden, false);
+await page.keyboard.press("l");
 check("...keeping the lab's category and section", [(await dbTask("alpha")).attrs.category, (await dbTask("alpha")).attrs.section], ["projects", "Lab"]);
 check("ab-pair keeps its one remaining subtask (tasks don't dissolve)", await parentTitle("bravo"), "ab-pair");
 await shot("8-pulled-out");
