@@ -8,9 +8,11 @@
 // is sooner. By default the board shows only what is due by the end of the coming
 // weekend; "show later" (or L) brings back the month and later rings.
 //
-// An open bubble carries only what dragging can't do: ⚡, ✓, and (once something has
-// changed) ↺. Dates are set by dragging a root to a ring. Subtasks are added with the ＋
-// at the end of an open bubble's subtasks: it becomes a bubble you type the name into.
+// An open bubble has its name (and its subtasks) in the middle and its controls on the
+// rim: along the bottom, what dragging can't do (⚡, ✓, ✕ to discard, and ↺ once something
+// has changed), and opposite them at the top, the ＋ that adds a subtask. Pressing ＋ puts
+// a new bubble after the subtasks, to type the name into. Dates are set by dragging a
+// root to a ring.
 //
 // What changed is where it reads and writes. The original read Obsidian markdown and
 // only *staged* deltas for misty to drain later, because a bug must never corrupt a
@@ -31,6 +33,7 @@ export const DARTBOARD_TOOLS = [
   "set_attributes",
   "unset_attributes",
   "complete_task",
+  "discard_task",
   "undo_edit",
 ] as const;
 type DartboardTool = (typeof DARTBOARD_TOOLS)[number];
@@ -70,14 +73,22 @@ const JITTER = 78, HALF_WEDGE = 43;
 const SIZE_LEVELS = 2;
 
 // Diameters by depth (index = depth, clamped). One click expands straight to `open`.
-const D_IDLE = [96, 60, 44];
+const D_IDLE = [96, 60, 44]; // a closed bubble with nothing open under it
+// PROTOTYPE: a closed bubble grows with the open subtasks under it, at any depth, so
+// what is left in it can be read off the board. Its AREA grows with the count (each
+// subtask adds GROW of the base area), up to MAX_GROW times the base diameter: bands are
+// narrow, and a bubble much wider than its band stops saying which band it is in.
+// `S` switches it off and on, to compare.
+const GROW = 0.25, MAX_GROW = 1.7;
 const D_OPEN = [300, 210, 156]; // floor for an open bubble with nothing inside
 const D_DONE = [44, 30, 24];
 const CHROME = [130, 96, 66]; // vertical room an open bubble needs for its own content
-// The slot after an open bubble's subtasks, indexed by that bubble's depth: the ＋, or
-// the bubble being named, which is bigger than a subtask so there is room to type.
-const D_ADD = [44, 34, 28];
+// The bubble being named, which follows an open bubble's subtasks, indexed by that
+// bubble's depth. It is bigger than a subtask so there is room to type.
 const D_NAMING = [128, 104, 88];
+// The controls on an open bubble's rim, by its depth: their diameter, the space between
+// them along the arc, and how far they sit inside the border.
+const BTN = [28, 22, 18], BTN_GAP = [7, 5, 4], BTN_INSET = [8, 6, 4];
 
 const K_RADIAL = 0.03, K_CENTER = 0.06, K_ANG_SOFT = 0.004, K_ANG_HARD = 0.055;
 const K_COLLIDE = 0.35, DAMP = 0.85, KE_FLOOR = 0.02;
@@ -117,6 +128,10 @@ interface BNode {
   zap: boolean;
   done: boolean;
   pending: boolean; // changed this session, here or below
+  /** Open subtasks under it, at any depth: what is left to do in here. */
+  load: number;
+  /** Tasks under it that were discarded this session. Not drawn, but ↺ brings them back. */
+  lost: string[];
   synthetic: boolean; // made by the draft (a merge); not in the database yet
   drafted: boolean; // the draft moves or creates it
   chain: string[]; // ids root-first, ending with this one
@@ -137,6 +152,7 @@ interface Staged { seq: number; type: string; targets: string[] }
 
 const SESSION_KEY = "misty.dartboard.session";
 const LATER_KEY = "misty.dartboard.showLater";
+const FLAT_KEY = "misty.dartboard.flatSizes";
 
 /** The earliest due date among `ns`. On a tie the first one keeps it. */
 const earliest = (ns: (BNode | null)[]) =>
@@ -150,6 +166,7 @@ type Elems = ReturnType<typeof makeBubbleShell>;
 const OPS = [
   { op: "zap", glyph: "⚡", tip: "quick task (≤15 min)" },
   { op: "done", glyph: "✓", tip: "done" },
+  { op: "discard", glyph: "✕", tip: "discard: not needed, or a duplicate (its subtasks go too)" },
   // only shown while this bubble (or anything under it) changed this session
   { op: "undo", glyph: "↺", tip: "undo this session's changes" },
 ] as const;
@@ -204,6 +221,76 @@ function noAutofill(input: HTMLInputElement | HTMLTextAreaElement) {
   input.setAttribute("data-form-type", "other");
 }
 
+// ─── titles ────────────────────────────────────────────────────────────────────
+// A title is set in a circle, so a line can only be as wide as the circle is at that
+// line's height: widest across the middle, narrower above and below. CSS wraps to a box,
+// which put the corners of a long title outside the rim and split words to fill it. So
+// lines are broken here: whole words, each line filled to its own chord, and as few
+// lines as will hold the title. What doesn't fit ends in an ellipsis (the whole title is
+// still in the element, and in the tooltip).
+const MAX_LINES = { idle: 4, open: 3 }; // an open bubble's title shares it with the subtasks
+const ruler = document.createElement("canvas").getContext("2d")!;
+const wordWidths = new Map<string, number>();
+function wordWidth(font: string, word: string) {
+  const key = `${font}\n${word}`;
+  let w = wordWidths.get(key);
+  if (w === undefined) { ruler.font = font; w = ruler.measureText(word).width; wordWidths.set(key, w); }
+  return w;
+}
+
+/** Where a title sits in its bubble, measured while it is still on one line. */
+interface TitleBox {
+  /** Radius the text may reach, and the bubble's centre, in the bubble's own pixels. */
+  r: number; cy: number;
+  top: number; lineHeight: number; fontSize: number; font: string;
+}
+
+/** The width of each of `n` lines. The block stays centred where it was, so it grows
+ *  up and down from the one-line position. */
+function chords(box: TitleBox, n: number): number[] {
+  const top = box.top - ((n - 1) * box.lineHeight) / 2;
+  return Array.from({ length: n }, (_, i) => {
+    // the far edge of the line's glyphs from the centre: that is where it is narrowest
+    const reach = Math.abs(top + (i + 0.5) * box.lineHeight - box.cy) + box.fontSize * 0.55;
+    return reach < box.r ? 2 * Math.sqrt(box.r ** 2 - reach ** 2) : 0;
+  });
+}
+
+/** Break `words` into lines for a circle. Returns each line with its width limit. */
+function breakTitle(words: string[], box: TitleBox, maxLines: number): { text: string; max: number }[] {
+  const space = wordWidth(box.font, " ");
+  const ws = words.map(w => wordWidth(box.font, w));
+  let best: { lines: { text: string; max: number }[]; score: number } | null = null;
+  let widest = 0; // the widest line tried so far: a word longer than this is cut wherever it goes
+  for (let n = 1; n <= Math.min(maxLines, words.length); n++) {
+    const cs = chords(box, n);
+    if (n > 1 && cs.some(c => c < box.fontSize * 2.5)) break; // no room for another line
+    widest = Math.max(widest, ...cs);
+    const lines: { text: string; max: number }[] = [];
+    let i = 0, shown = 0, clipped = false, cutShort = 0;
+    for (let l = 0; l < n; l++) {
+      const last = l === n - 1, start = i;
+      let w = 0;
+      // the last line takes what is left; the others leave a word for each line below
+      while (i < words.length && (last || i === start || (w + space + ws[i] <= cs[l] && words.length - i > n - 1 - l))) {
+        w += (i > start ? space : 0) + ws[i++];
+      }
+      if (w > cs[l] + 0.5) {
+        clipped = true;
+        // A word cut because its line is one of the narrow ones, when it fits a wider
+        // line, reads much worse than a cut at the end: "Recon… the quarterly".
+        if (!last && ws[start] <= widest) cutShort++;
+      }
+      shown += Math.min(w, cs[l]);
+      lines.push({ text: words.slice(start, i).join(" "), max: cs[l] });
+    }
+    if (!clipped) return lines; // the fewest lines that hold it all
+    const score = shown - cutShort * 10000; // otherwise, whatever shows the most of it
+    if (!best || score > best.score) best = { lines, score };
+  }
+  return best?.lines ?? [{ text: words.join(" "), max: chords(box, 1)[0] }];
+}
+
 /** The shell every bubble shares — root and subtask alike. A kid IS a bubble. */
 function makeBubbleShell() {
   const g = el("div", "bubble");
@@ -212,8 +299,9 @@ function makeBubbleShell() {
   const text = el("div", "text");
   const meta = el("div", "meta");
   const kids = el("div", "kids");
+  // The controls sit on the rim, outside the centred column: `row` covers the bubble and
+  // each control is placed on it by angle (see placeControls).
   const row = el("div", "actions");
-  // The ＋ is drawn as the next subtask's empty place: last in `kids`, bubble-shaped.
   const add = el("button", "add-kid", "+");
   add.title = "add a subtask";
   add.setAttribute("aria-label", "add a subtask");
@@ -233,8 +321,9 @@ function makeBubbleShell() {
     row.appendChild(b);
     btns.set(op.op, b);
   }
-  body.append(zap, text, meta, kids, pick, row);
-  g.appendChild(body);
+  row.appendChild(add);
+  body.append(zap, text, meta, kids, pick);
+  g.append(body, row);
   return { g, text, meta, kids, row, zap, add, pick, dinput, btns };
 }
 
@@ -262,6 +351,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   let today = new Date(), tomorrow = today, nextSat = today, weekendEnd = today, monthOut = today;
   // Per tab, like the session: a new tab starts with the short view.
   let showLater = (() => { try { return sessionStorage.getItem(LATER_KEY) === "1"; } catch { return false; } })();
+  let sizeByLoad = (() => { try { return sessionStorage.getItem(FLAT_KEY) !== "1"; } catch { return true; } })();
 
   const session: { id: string; staged: Staged[] } = (() => {
     try {
@@ -305,7 +395,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   const tail = () => focusPath[focusPath.length - 1] ?? null;
   const stateOf = (n: BNode) => (focusPath.includes(n.id) ? "open" : "idle");
   const canDecompose = (n: BNode) => !n.synthetic;
-  const subtreeIds = (n: BNode): string[] => [n.id, ...n.children.flatMap(subtreeIds)];
+  const subtreeIds = (n: BNode): string[] => [n.id, ...n.lost, ...n.children.flatMap(subtreeIds)];
   const walk = (n: BNode, id: string): BNode | null =>
     n.id === id ? n : n.children.reduce<BNode | null>((a, c) => a ?? walk(c, id), null);
   const findNode = (id: string) => { for (const r of nodes) { const f = walk(r, id); if (f) return f; } return null; };
@@ -315,6 +405,9 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     const touched = new Set(session.staged.flatMap(s => s.targets));
     const completedHere = new Set(
       session.staged.filter(s => s.type === "task.completed").flatMap(s => s.targets),
+    );
+    const discardedHere = new Set(
+      session.staged.filter(s => s.type === "task.discarded").flatMap(s => s.targets),
     );
     const byParent = new Map<string | null, Task[]>();
     for (const t of tasks) {
@@ -326,6 +419,10 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     // session, so ↺ can still reach it. Subtasks show done ones, like the original.
     const rootVisible = (t: Task) => t.state === "open" || (t.state === "done" && completedHere.has(t.id));
     const kidVisible = (t: Task) => t.state === "open" || t.state === "done";
+    // Discarded here, under `id`: a discarded task's subtasks were discarded with it.
+    const lostUnder = (id: string): string[] => (byParent.get(id) ?? [])
+      .filter(k => k.state === "discarded" && discardedHere.has(k.id))
+      .flatMap(k => [k.id, ...lostUnder(k.id)]);
 
     const makeNode = (t: Task, depth: number, parentChain: string[]): BNode => {
       const a = t.attrs;
@@ -336,7 +433,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
         section: typeof a.section === "string" ? a.section : "",
         date, dateType: date ? (a.date_kind === "scheduled" ? "scheduled" : "due") : null,
         deadline: null,
-        zap: a.quick === true, done: t.state === "done", pending: false,
+        zap: a.quick === true, done: t.state === "done", pending: false, load: 0, lost: [],
         synthetic: R.isNew(t.id), drafted: reorg.nodes.has(t.id),
         chain: [...parentChain, t.id], children: [],
       };
@@ -344,7 +441,9 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
         node.children = (byParent.get(t.id) ?? []).filter(kidVisible)
           .map(k => makeNode(k, depth + 1, node.chain));
       }
-      node.pending = touched.has(t.id) || node.children.some(c => c.pending);
+      if (!parentChain.includes(t.id)) node.lost = lostUnder(t.id);
+      node.pending = touched.has(t.id) || node.lost.length > 0 || node.children.some(c => c.pending);
+      node.load = node.children.reduce((a, c) => a + (c.done ? 0 : 1 + c.load), 0);
       // Done subtasks (and what is under them) no longer have a deadline to meet.
       node.deadline = earliest([node.dateType === "due" ? node : null, deadlineBelow(node)]);
       return node;
@@ -397,20 +496,22 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   // An open bubble must fit its (possibly open) children, so size resolves bottom-up.
   function diamOf(n: BNode): number {
     const d = Math.min(n.depth, SIZE_LEVELS);
-    if (stateOf(n) === "idle") return n.done ? D_DONE[d] : D_IDLE[d];
+    if (stateOf(n) === "idle") {
+      if (n.done) return D_DONE[d];
+      return D_IDLE[d] * (sizeByLoad ? Math.min(MAX_GROW, Math.sqrt(1 + GROW * n.load)) : 1);
+    }
     // area-based pack: √(Σ kid areas) is the side of the square they'd tile;
     // ×1.7 is slack for flex-wrap gaps and the circle's unusable corners.
     const area = n.children.reduce((a, k) => a + diamOf(k) ** 2, slotDiam(n) ** 2);
     return Math.max(D_OPEN[d], Math.sqrt(area) * 1.7 + CHROME[d]);
   }
 
-  /** What follows an open bubble's subtasks: the ＋, the bubble being named, or nothing. */
+  /** How an open bubble takes a new subtask: the ＋ on its rim, the bubble being named
+   *  (which follows its subtasks), or not at all. */
   const slotOf = (n: BNode): "add" | "naming" | null =>
     !canDecompose(n) || datePickFor === n.id ? null : namingIn === n.id ? "naming" : "add";
-  function slotDiam(n: BNode) {
-    const slot = slotOf(n), d = Math.min(n.depth, SIZE_LEVELS);
-    return slot === "naming" ? D_NAMING[d] : slot === "add" ? D_ADD[d] : 0;
-  }
+  /** Room among the subtasks for the bubble being named. The ＋ is on the rim, not here. */
+  const slotDiam = (n: BNode) => (slotOf(n) === "naming" ? D_NAMING[Math.min(n.depth, SIZE_LEVELS)] : 0);
 
   // ─── physics ─────────────────────────────────────────────────────────────────
   /** One step at heat `alpha`. Returns the kinetic energy. */
@@ -517,6 +618,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     if (/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName ?? "")) return;
     if (e.key === "0") fitCam();
     if ((e.key === "l" || e.key === "L") && !e.metaKey && !e.ctrlKey && !e.altKey) setShowLater(!showLater);
+    if ((e.key === "s" || e.key === "S") && !e.metaKey && !e.ctrlKey && !e.altKey) setSizeByLoad(!sizeByLoad);
     // the bubble being named is the innermost level, so esc leaves it first
     if (e.key === "Escape") { if (namingIn) { endNaming(false); sync(); } else stepOut(); }
     if ((e.key === "+" || e.key === "=") && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -1189,14 +1291,59 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
         : run("set_attributes", { task_id: n.id, attrs: { quick: true } });
     }
     if (op === "done") return n.done ? undefined : run("complete_task", { task_id: n.id });
+    if (op === "discard") return discard(n);
   }
 
-  function flash(msg: string, kind: "error" | "info" = "error") {
+  /** Discard a task, and with it everything under it: the server won't discard a task
+   *  that still has subtasks, so they go first, deepest first. The list comes from the
+   *  database rather than the board, so subtasks that aren't drawn (released ones) go
+   *  too. One click, like every edit here, and one click back: the message offers undo,
+   *  and so does ↺ on the bubble it was in. */
+  async function discard(n: BNode) {
+    const under = (id: string): string[] => tasksCache
+      .filter(t => t.parent_id === id && t.state !== "discarded")
+      .flatMap(t => [...under(t.id), t.id]);
+    const ids = [...under(n.id), n.id];
+    // The draft is laid over the database, so a task it moves isn't where the database
+    // says. Discarding one would leave the draft pointing at nothing.
+    const inSubtree = new Set(ids);
+    const drafted = [...reorg.nodes].some(([id, e]) => inSubtree.has(id) || (e.parent !== null && inSubtree.has(e.parent)))
+      || ids.some(id => reorg.removed.has(id));
+    if (drafted) return flash("this is being reorganised · apply or discard that first");
+    const seqs: number[] = [];
+    for (const id of ids) {
+      try {
+        const edit = await ctx.dispatch("discard_task", { task_id: id }, { correlationId: session.id });
+        session.staged.push({ seq: edit.seq, type: edit.type, targets: edit.targets });
+        seqs.push(edit.seq);
+      } catch (e) {
+        flash(e instanceof CommandRejected ? `rejected: ${e.message}` : String(e));
+        break;
+      }
+    }
+    saveSession();
+    const wasOpen = focusPath.length > 0;
+    await refresh();
+    if (wasOpen && !focusPath.length) sendHome(); // it was the open root
+    if (seqs.length < ids.length) return; // stopped part-way: the reason is on screen
+    const rest = ids.length - 1;
+    flash(`discarded "${n.text}"${rest ? ` and its ${rest} subtask${rest === 1 ? "" : "s"}` : ""}`, "info",
+      { label: "undo", run: () => void undoStaged(s => seqs.includes(s.seq)) });
+  }
+
+  /** `action`: a button in the message, for the one thing worth doing about it. */
+  function flash(msg: string, kind: "error" | "info" = "error", action?: { label: string; run: () => void }) {
     const f = $("flash");
-    f.textContent = msg; f.hidden = false;
+    f.replaceChildren(msg);
+    if (action) {
+      const b = el("button", "flash-act", action.label);
+      b.addEventListener("click", () => { f.hidden = true; action.run(); });
+      f.append(b);
+    }
+    f.hidden = false;
     f.classList.toggle("is-info", kind === "info");
     clearTimeout(flashTimer);
-    flashTimer = setTimeout(() => { f.hidden = true; }, 4000);
+    flashTimer = setTimeout(() => { f.hidden = true; }, action ? 8000 : 4000);
   }
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -1206,6 +1353,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     if (drag?.started) return; // a render would destroy the bubble being dragged
     if (nodes.map(n => n.id).join() !== builtIds) buildBubbles();
     for (const n of nodes) paintBubble(n, gfx.get(n.id));
+    fitTitles();
     drawHud();
     paintToolbar();
     restoreCaret();
@@ -1215,6 +1363,8 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   const dateLabel = (n: BNode) => (n.date ? `${n.dateType === "scheduled" ? "⏳" : "📅"} ${short(n.date)}` : "no date");
   /** For a root placed by a subtask's deadline rather than its own date: which one. */
   const placedBy = (n: BNode) => (n.deadline && n.deadline !== n ? `subtask due ${short(n.deadline.date!)}` : "");
+
+  const brokenDown = (n: BNode) => (n.children.length ? `${n.load} open subtask${n.load === 1 ? "" : "s"}` : "not broken down");
 
   function paintBubble(n: BNode, e: Elems | undefined) {
     if (!e) return;
@@ -1236,10 +1386,12 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     e.meta.textContent = meta.filter(Boolean).join(" · ");
     e.meta.style.display = st === "idle" || !e.meta.textContent ? "none" : "block";
     e.g.title = isRoot
-      ? `${n.text}\n${[n.section || "—", dateLabel(n), n.deadline && n.deadline !== n ? `placed by "${n.deadline.text}", due ${short(n.deadline.date!)}` : ""].filter(Boolean).join(" · ")}\n${n.children.length ? n.children.length + " subtasks" : "not broken down"}`
-      : `${n.text}\n${n.children.length ? n.children.length + " subtasks" : "not broken down"}`;
+      ? `${n.text}\n${[n.section || "—", dateLabel(n), n.deadline && n.deadline !== n ? `placed by "${n.deadline.text}", due ${short(n.deadline.date!)}` : ""].filter(Boolean).join(" · ")}\n${brokenDown(n)}`
+      : `${n.text}\n${brokenDown(n)}`;
 
     for (const op of OPS) e.btns.get(op.op)!.style.display = opVisible(n, op) ? "" : "none";
+    e.add.style.display = slotOf(n) === "add" ? "" : "none";
+    if (st === "open") placeControls(n, e);
     e.btns.get("zap")!.classList.toggle("is-on", n.zap);
     e.btns.get("done")!.classList.toggle("is-on", n.done);
 
@@ -1256,12 +1408,64 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
         paintBubble(k, ke);
         ke.g.style.width = ke.g.style.height = diamOf(k) + "px";
       }
-      const slot = slotOf(n), tile = slot === "naming" ? namer : slot === "add" ? e.add : null;
-      if (tile) {
-        tile.style.width = tile.style.height = slotDiam(n) + "px";
-        if (tile === namer) namer.className = `bubble kid is-naming is-d${Math.min(n.depth + 1, SIZE_LEVELS)}`;
-        e.kids.appendChild(tile);
+      if (slotOf(n) === "naming") {
+        namer.style.width = namer.style.height = slotDiam(n) + "px";
+        namer.className = `bubble kid is-naming is-d${Math.min(n.depth + 1, SIZE_LEVELS)}`;
+        e.kids.appendChild(namer);
       }
+    }
+  }
+
+  /** Put an open bubble's controls on its rim: the edits in a row along the bottom,
+   *  centred on the lowest point and following the curve, and the ＋ at the top, opposite
+   *  them. The middle is left to the name and the subtasks. */
+  function placeControls(n: BNode, e: Elems) {
+    const d = Math.min(n.depth, SIZE_LEVELS), btn = BTN[d];
+    // the circle the controls' centres sit on (the border is a few px; near enough)
+    const orbit = diamOf(n) / 2 - 4 - BTN_INSET[d] - btn / 2;
+    const at = (b: HTMLElement, angle: number) => {
+      b.style.left = `calc(50% + ${(Math.cos(angle) * orbit).toFixed(1)}px)`;
+      b.style.top = `calc(50% + ${(Math.sin(angle) * orbit).toFixed(1)}px)`;
+    };
+    e.g.style.setProperty("--btn", `${btn}px`);
+    const shown = OPS.filter(op => opVisible(n, op)).map(op => e.btns.get(op.op)!);
+    const step = (btn + BTN_GAP[d]) / orbit; // radians between neighbours
+    // y points down, so 90° is the bottom, and left of it is a larger angle
+    shown.forEach((b, i) => at(b, Math.PI / 2 - (i - (shown.length - 1) / 2) * step));
+    at(e.add, -Math.PI / 2);
+  }
+
+  /** Break every drawn title to fit its circle (see breakTitle). paintBubble leaves each
+   *  title on one line; here they are all measured, then all rewritten, so the browser
+   *  lays the board out once rather than once per bubble. A bubble's size doesn't depend
+   *  on its title, so no bubble's answer changes another's. */
+  function fitTitles() {
+    paint(); // roots get their size from the simulation; a title is measured against it
+    const jobs: { text: HTMLElement; words: string[]; box: TitleBox; maxLines: number }[] = [];
+    for (const e of gfx.values()) {
+      if (!e.g.isConnected || !e.g.clientWidth) continue; // not drawn
+      const words = (e.text.textContent ?? "").split(/\s+/).filter(Boolean);
+      if (!words.length) continue;
+      const cs = getComputedStyle(e.text), fontSize = parseFloat(cs.fontSize);
+      const inner = e.g.clientWidth / 2; // inside the border
+      jobs.push({
+        text: e.text, words,
+        maxLines: e.g.classList.contains("is-open") ? MAX_LINES.open : MAX_LINES.idle,
+        box: {
+          r: inner - Math.max(2, inner * 0.06), cy: e.g.clientHeight / 2,
+          top: e.text.offsetTop, lineHeight: e.text.offsetHeight, fontSize,
+          font: `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`,
+        },
+      });
+    }
+    for (const j of jobs) {
+      const lines = breakTitle(j.words, j.box, j.maxLines);
+      j.text.replaceChildren(...lines.map((ln, i) => {
+        // the space keeps the element's text the title, however it is broken
+        const span = el("span", "ln", i < lines.length - 1 ? `${ln.text} ` : ln.text);
+        span.style.maxWidth = `${Math.floor(ln.max)}px`;
+        return span;
+      }));
     }
   }
 
@@ -1306,7 +1510,7 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     }
     const pops = reorg.memory.filter(m => !m.forgotten).length;
     if (pops) hud.append(el("div", "draft", `${pops} popped · collapse brings back ${R.wouldRestore(baseMap(), reorg).size}`));
-    hud.append(el("div", "keys", "click to open · click a subtask to go deeper · ＋ adds a subtask · esc backs out · scroll to zoom · 0 to fit · L shows later"));
+    hud.append(el("div", "keys", "click to open · click a subtask to go deeper · ＋ adds a subtask · esc backs out · scroll to zoom · 0 to fit · L shows later · S sizes by subtasks"));
     hud.append(el("div", "keys", "drag a bubble to a ring to reschedule · drag a subtask onto another to merge · click an open subtask's space to pop it"));
   }
 
@@ -1401,6 +1605,15 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
     }
   }
 
+  /** PROTOTYPE: closed bubbles sized by their open subtasks, or all one size. */
+  function setSizeByLoad(on: boolean) {
+    sizeByLoad = on;
+    try { sessionStorage.setItem(FLAT_KEY, on ? "0" : "1"); } catch { /* private mode */ }
+    sync();
+    sendHome(); // bubbles that shrank leave gaps; the others close up
+    flash(on ? "bubbles sized by their open subtasks · S for one size" : "bubbles all one size · S to size by subtasks", "info");
+  }
+
   function paintToolbar() {
     const later = nodes.filter(n => LATER.has(n.band)).length;
     laterBtn.textContent = showLater ? "hide later" : later ? `show later · ${later}` : "show later";
@@ -1486,13 +1699,14 @@ export function mountDartboard(container: HTMLElement, ctx: ViewContext<Dartboar
   // test seams — assertions only. Interaction must go through real clicks.
   const summarise = (n: BNode): object => ({
     id: n.id, text: n.text, depth: n.depth, state: stateOf(n), zap: n.zap, done: n.done,
-    pending: n.pending, children: n.children.map(summarise),
+    pending: n.pending, load: n.load, children: n.children.map(summarise),
   });
   const w = window as unknown as Record<string, unknown>;
   w.__state = () => nodes.map(n => ({ ...summarise(n), band: n.band, category: n.category, dateType: n.dateType, hidden: isHidden(n) }));
   w.__focus = () => ({ path: [...focusPath] });
   w.__session = () => ({ id: session.id, staged: session.staged.map(s => ({ ...s })) });
   w.__physics = () => ({ running: raf !== null, frames: physFrames });
+  w.__sizes = () => Object.fromEntries(nodes.map(n => [n.text, Math.round(n.r * 2)]));
   w.__draft = () => ({ id: draftId, structure: R.toStructure(reorg), memory: reorg.memory.map(m => ({ ...m })) });
   w.__audit = () => nodes.filter(n => n.category && n.category in QUAD).filter(n => {
     const dx = n.x - CX, dy = n.y - CY, r = Math.hypot(dx, dy);

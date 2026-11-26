@@ -3,9 +3,34 @@
 A living log: what's done, what's next, known problems, and ideas not yet scheduled.
 Design decisions themselves go in `docs/adr/`. This file is for everything around them.
 
-_Last updated: 2026-11-24 · branch `main`_
+_Last updated: 2026-11-26 · branch `main`_
 
 ## Done
+
+### Dartboard: discard, controls on the rim, titles that fit, and size by subtasks
+- **✕ discards a task** from its open bubble, along with everything under it (deepest
+  first: the server refuses to discard a task that still has subtasks). The list comes
+  from the database, so released subtasks, which aren't drawn, go too.
+  - The message that follows has an **undo** button for 8s. After that, ↺ on the bubble
+    it was in restores it (a parent now carries the halo for what was discarded under
+    it), or "reset all". A discarded root has no parent bubble, so for it it's the
+    message or "reset all".
+  - It is several edits, not one batch: the web API has no batch endpoint. If one is
+    refused part-way, the ones before it stand, and are undoable.
+  - Refused for a task the open reorganisation touches, until that is applied or discarded.
+- **Controls sit on the rim of an open bubble:** ⚡ ✓ ✕ (and ↺) along the bottom arc, and
+  the ＋ at the top, opposite them. The name and the subtasks have the middle. The ＋ no
+  longer sits among the subtasks; pressing it still puts the bubble to be named there.
+- **Titles are broken to fit the circle** (`breakTitle` in `board.ts`). CSS wrapped to a
+  box, so long titles crossed the rim and words were split to fill it. Now each line is as
+  wide as the circle is at its height, words stay whole, the fewest lines that hold the
+  title are used (up to 4 closed, 3 open), and the rest ends in an ellipsis.
+- **Prototype: a closed bubble grows with its open subtasks,** at any depth. Area grows
+  with the count, a quarter of the base area per subtask, capped at 1.7× the base
+  diameter (96 → 163px for a root, reached at 8). Done subtasks don't count. `S` switches
+  it off and on for the tab. To decide: keep it, the curve and the cap, and whether to
+  count open subtasks (what is left) or all of them.
+- View only: no new edit types, API or migration. The board now uses `discard_task`.
 
 ### Dartboard: the short view, and deadlines from subtasks
 - **Short view by default.** Only roots due by the end of the coming weekend are drawn.
@@ -124,6 +149,17 @@ bubbles sit outside their place. They no longer jitter, but they cluster.
 - **Alternative:** shrink overdue bubbles.
 
 ## Known problems and rough edges
+- **Bigger bubbles overhang narrow rings.** With size by subtasks, a 163px bubble in the
+  85px tomorrow ring reaches well into its neighbours. Its centre is still in its ring.
+- **A dropped bubble occasionally doesn't make it home.** In the e2e test, a root dragged
+  to the far side of the today ring failed to reach its own wedge within the 8s it is
+  given, twice in about 30 runs (never in 8 runs before this change). Usually it takes
+  0.3–3.5s, so it is getting stuck behind something, not running slow. Not understood.
+- **Two e2e failures that were not reproduced.** While the ＋ was still among the
+  subtasks, two runs failed in the reorganising steps: once Collapse had nothing to
+  restore after a merge, once a draft was still open 15s after the board closed. Neither
+  has appeared in 8 runs since the controls moved to the rim, but the cause was never
+  found, so they may come back.
 - **Small targets.** At the default zoom, subtasks are 14–29px on screen, so dragging them
   is fiddly. Ideas: zoom in on an open bubble automatically, and give subtasks a grab
   cursor and a slight lift on hover.

@@ -69,6 +69,11 @@ const archive = await create("archive the notes", { category: "uni" });
 await command("complete_task", { task_id: await create("find the box", { date: "2026-07-15", date_kind: "due" }, archive) });
 await create("call home", { category: "admin", date: "2026-07-19", date_kind: "due" }); // the Sunday
 await create("renew passport", { category: "admin", date: "2026-07-20", date_kind: "due" }); // the Monday after
+// a long title, and something to discard: backlog ─ old tickets ─ triage them ; backlog ─ stale branches
+const BACKLOG = "clear out the backlog of stale tickets before the quarterly review";
+const backlog = await create(BACKLOG, { category: "admin", date: "2026-07-15", date_kind: "due" });
+await create("triage them", {}, await create("old tickets", {}, backlog));
+await create("stale branches", {}, backlog);
 
 // ── checks ───────────────────────────────────────────────────────────────────
 let fails = 0;
@@ -97,13 +102,31 @@ const nodeOf = async label => { for (const n of await state()) { const f = walk(
 const rootBubble = async label => page.locator("#bubbles > .bubble").nth((await state()).findIndex(n => n.text === label));
 const kidBubble = label => page.locator("#bubbles .bubble.kid").filter({ has: page.locator("> .body > .text", { hasText: label }) }).first();
 const clickBubble = async loc => { await loc.click(); await page.waitForTimeout(150); };
-const clickOp = async (loc, op) => { await loc.locator(`> .body > .actions > .act[data-op="${op}"]`).click(); await page.waitForTimeout(150); };
-const controls = loc => loc.locator("> .body > .actions > .act:visible").allTextContents();
-const addIn = loc => loc.locator("> .body > .kids > .add-kid");
+const clickOp = async (loc, op) => { await loc.locator(`> .actions > .act[data-op="${op}"]`).click(); await page.waitForTimeout(150); };
+const controls = loc => loc.locator("> .actions > .act:visible").allTextContents();
+const addIn = loc => loc.locator("> .actions > .add-kid");
+// where an open bubble's controls sit, as seen from its centre (90° is straight down)
+const rim = loc => loc.evaluate(b => {
+  const c = b.getBoundingClientRect(), R = c.width / 2;
+  const polar = el => {
+    const q = el.getBoundingClientRect(), x = q.left + q.width / 2 - c.left - R, y = q.top + q.height / 2 - c.top - R;
+    return { r: Math.hypot(x, y) / R, deg: Math.atan2(y, x) * 180 / Math.PI };
+  };
+  const acts = [...b.querySelectorAll(":scope > .actions > .act")].filter(a => a.offsetParent).map(polar);
+  const add = polar(b.querySelector(":scope > .actions > .add-kid")), name = polar(b.querySelector(":scope > .body > .text"));
+  return {
+    add: Math.round(add.deg),
+    others: Math.round(acts.reduce((sum, a) => sum + a.deg, 0) / acts.length),
+    alongTheBottom: acts.every(a => a.deg > 45 && a.deg < 135),
+    onOneCircleNearTheEdge: add.r > 0.75 && acts.every(a => Math.abs(a.r - add.r) < 0.02),
+    nameInTheMiddle: name.r < 0.4,
+  };
+});
 const namer = page.locator("#bubbles .bubble.is-naming");
 const focus = async () => (await page.evaluate(() => window.__focus())).path;
-// the empty band just inside an open bubble's top edge: no kid, text or control there
-const clickSpace = async loc => { const b = await loc.boundingBox(); await page.mouse.click(b.x + b.width / 2, b.y + b.height * 0.06); await page.waitForTimeout(700); };
+// the empty band just inside an open bubble's left edge: no kid, text or control there
+// (the controls are at the top and bottom of the rim)
+const clickSpace = async loc => { const b = await loc.boundingBox(); await page.mouse.click(b.x + b.width * 0.04, b.y + b.height / 2); await page.waitForTimeout(700); };
 
 // a point on the board, by distance from the centre and angle
 const boardPoint = async (r, deg) => {
@@ -144,8 +167,38 @@ check("bands from date/date_kind", bands, {
   "ship the report": "weekend",
   "archive the notes": "rim", // a done subtask's date no longer counts
   "call home": "weekend", "renew passport": "month", // the weekend runs to the end of Sunday
+  [BACKLOG]: "today",
 });
 check("every categorised bubble sits in its wedge and band", await page.evaluate(() => window.__audit()), []);
+
+// a closed bubble grows with the open subtasks under it, at any depth (a prototype; S switches it)
+const sizes = () => page.evaluate(() => window.__sizes());
+const pick = (o, ...keys) => keys.map(k => o[k]);
+check("a bubble with no subtasks is the base size; more open subtasks make it bigger",
+  pick(await sizes(), "pay rent", "understand evaluations", BACKLOG, "reorg lab"), [96, 118, 127, 152]);
+check("...a done subtask doesn't count", (await sizes())["archive the notes"], 96);
+await page.keyboard.press("s");
+check("S makes them all one size", [...new Set(Object.values(await sizes()))], [96]);
+await page.keyboard.press("s");
+check("...and S again sizes them by subtasks", (await sizes())["reorg lab"], 152);
+check("...with every bubble still in its wedge and band", await until(async () => (await page.evaluate(() => window.__audit())).length === 0, 8000), true);
+
+// a title is broken into lines that fit the circle: whole words, nothing over the rim
+const titleLines = loc => loc.locator("> .body > .text > .ln").allTextContents();
+const oneLine = t => t.replace(/\s+/g, " ").trim();
+// every drawn title line whose box pokes outside its bubble
+const overTheRim = () => page.evaluate(() => [...document.querySelectorAll("#bubbles .bubble")].filter(b => b.clientWidth).flatMap(b => {
+  const c = b.getBoundingClientRect(), cx = c.left + c.width / 2, cy = c.top + c.height / 2;
+  return [...b.querySelectorAll(":scope > .body > .text > .ln")].filter(ln => {
+    const q = ln.getBoundingClientRect();
+    return Math.max(...[q.left, q.right].flatMap(x => [q.top, q.bottom].map(y => Math.hypot(x - cx, y - cy)))) > c.width / 2;
+  }).map(ln => ln.textContent);
+}));
+const backlogLines = await titleLines(await rootBubble(BACKLOG));
+check("a long title takes several lines", backlogLines.length > 2, true);
+check("...broken between words, and all still there", oneLine(backlogLines.join("")), BACKLOG);
+check("...a short one takes one", await titleLines(await rootBubble("pay rent")), ["pay rent"]);
+check("no title line crosses its bubble's rim", await overTheRim(), []);
 
 // by default only what is due by the end of the coming weekend is drawn
 const hiddenOnes = async () => (await state()).filter(n => n.hidden).map(n => n.text).sort();
@@ -172,14 +225,16 @@ check("show later brings them back", [await hiddenOnes(), await page.innerText("
 check("...without moving anything", [await places(), await page.evaluate(() => window.__physics().running)], [placesBefore, false]);
 await shot("1-later");
 
-// one click opens: subtasks, the ＋, and the few controls a drag can't replace
+// one click opens: the name and subtasks in the middle, the controls on the rim
 const evalsB = await rootBubble("understand evaluations");
 check("bubbles start idle", (await nodeOf("understand evaluations")).state, "idle");
 await clickBubble(evalsB);
 check("a single click opens it", (await nodeOf("understand evaluations")).state, "open");
 check("...showing its subtasks", await evalsB.locator("> .body > .kids > .bubble.kid > .body > .text").allInnerTexts(), ["metrics", "baseline"]);
-check("...and two controls (↺ hidden until something changes)", await controls(evalsB), ["⚡", "✓"]);
-check("...with one ＋ after the subtasks", await evalsB.locator("> .body > .kids > *").evaluateAll(els => els.map(e => e.className.split(" ")[0])), ["bubble", "bubble", "add-kid"]);
+check("...and three controls (↺ hidden until something changes)", await controls(evalsB), ["⚡", "✓", "✕"]);
+check("...on the rim: ＋ at the top, the others along the bottom, opposite it", await rim(evalsB),
+  { add: -90, others: 90, alongTheBottom: true, onOneCircleNearTheEdge: true, nameInTheMiddle: true });
+check("...leaving the middle to the subtasks", await evalsB.locator("> .body > .kids > *").evaluateAll(els => els.map(e => e.className.split(" ")[0])), ["bubble", "bubble"]);
 check("...and no text box until it is asked for", await evalsB.locator("input:visible, textarea:visible").count(), 0);
 check("meta shows section + date", (await evalsB.locator("> .body > .meta").innerText()).includes("EMAS Alert Automation"), true);
 await shot("2-open");
@@ -187,8 +242,9 @@ await shot("2-open");
 // a subtask opens inside its parent, with the same controls and a ＋ of its own
 await clickBubble(kidBubble("metrics"));
 check("focus is a chain", (await page.evaluate(() => window.__focus())).path.length, 2);
-check("subtask controls are the same", await controls(kidBubble("metrics")), ["⚡", "✓"]);
-check("...and it has its own ＋", await addIn(kidBubble("metrics")).isVisible(), true);
+check("subtask controls are the same", await controls(kidBubble("metrics")), ["⚡", "✓", "✕"]);
+check("open, titles and subtask titles still fit their circles", await overTheRim(), []);
+check("...and it has its own ＋, placed the same way", [await addIn(kidBubble("metrics")).isVisible(), (await rim(kidBubble("metrics"))).add], [true, -90]);
 await clickOp(kidBubble("metrics"), "done");
 check("✓ on a subtask completes it in the db", await until(async () => (await dbTask("metrics"))?.state === "done"), true);
 check("...and it shows done + pending", await until(async () => { const n = await nodeOf("metrics"); return n?.done && n.pending; }), true);
@@ -217,14 +273,15 @@ await (await rootBubble("plan exam prep")).locator("> .body > .datepick input").
 check("the picker sets a scheduled date", await until(async () => (await dbTask("plan exam prep")).attrs.date_kind === "scheduled"), true);
 check("...which lives on the rim", await until(async () => (await nodeOf("plan exam prep")).band === "rim"), true);
 
-// ＋ becomes a bubble with a text box; ↵ makes it a task
+// ＋ makes a bubble with a text box; ↵ makes it a task
 const gemmaB = async () => rootBubble("gemma 4 project");
-const gemmaKids = async () => (await gemmaB()).locator("> .body > .kids > .bubble.kid:not(.is-naming) > .body > .text").allInnerTexts();
+// a title may be drawn on several lines; it is still one title
+const gemmaKids = async () => (await (await gemmaB()).locator("> .body > .kids > .bubble.kid:not(.is-naming) > .body > .text").allInnerTexts()).map(oneLine);
 await clickBubble(await gemmaB());
-check("an open childless bubble holds just the ＋", await (await gemmaB()).locator("> .body > .kids > *").count(), 1);
+check("an open childless bubble holds nothing but its name; the ＋ is on its rim", [await (await gemmaB()).locator("> .body > .kids > *").count(), await addIn(await gemmaB()).isVisible()], [0, true]);
 await addIn(await gemmaB()).click();
-check("＋ turns into a bubble with a focused text box", await page.evaluate(() => document.activeElement?.closest(".bubble")?.classList.contains("is-naming") ?? false), true);
-check("...in the ＋'s place", [await addIn(await gemmaB()).count(), await (await gemmaB()).locator("> .body > .kids > .bubble.is-naming").count()], [0, 1]);
+check("＋ makes a bubble with a focused text box", await page.evaluate(() => document.activeElement?.closest(".bubble")?.classList.contains("is-naming") ?? false), true);
+check("...among the subtasks, and the ＋ steps aside", [await addIn(await gemmaB()).isVisible(), await (await gemmaB()).locator("> .body > .kids > .bubble.is-naming").count()], [false, 1]);
 const seqNaming = (await edits()).at(-1).seq;
 await page.keyboard.type("write the outline");
 check("typing writes nothing", (await edits()).at(-1).seq, seqNaming);
@@ -234,20 +291,22 @@ const gemmaId = (await dbTask("gemma 4 project")).id;
 check("↵ creates the subtask in the db", await until(async () => (await dbTask("write the outline"))?.parent_id === gemmaId), true);
 check("...shown inside the open parent", await until(async () => (await gemmaKids()).includes("write the outline")), true);
 check("...and an empty bubble is ready for the next one", [await namer.count(), await namer.locator("textarea").inputValue()], [1, ""]);
-check("parent is now pending (↺ visible)", await (await gemmaB()).locator('> .body > .actions > .act[data-op="undo"]').isVisible(), true);
+check("parent is now pending (↺ visible)", await (await gemmaB()).locator('> .actions > .act[data-op="undo"]').isVisible(), true);
 
 // clicking away keeps what was typed; on the parent's own space that's all the click does
 await page.keyboard.type("gather sources");
 await clickSpace(await gemmaB());
 check("clicking away from a named bubble creates it", await until(async () => (await dbTask("gather sources"))?.parent_id === gemmaId), true);
 check("...the parent stays open", await focus(), [gemmaId]);
-check("...and the ＋ is back", [await namer.count(), await addIn(await gemmaB()).count()], [0, 1]);
+check("...and the ＋ is back", [await namer.count(), await addIn(await gemmaB()).isVisible()], [0, true]);
 
 // so does starting a drag; here the subtask is dropped back where it was, in its parent
 await addIn(await gemmaB()).click();
 await page.keyboard.type("draft   the  intro");
+// The parent shrinks as the drag starts (the bubble being named was bigger than the
+// subtask it becomes), so aim well inside it, above the subtasks.
 const top = await (await gemmaB()).boundingBox();
-await dragTo(kidBubble("write the outline"), { x: top.x + top.width / 2, y: top.y + top.height * 0.08 });
+await dragTo(kidBubble("write the outline"), { x: top.x + top.width / 2, y: top.y + top.height * 0.2 });
 check("starting a drag creates it too, as a one-line title", await until(async () => (await dbTask("draft the intro"))?.parent_id === gemmaId), true);
 check("...and the drag itself still works (dropped in place: no draft)", [(await page.evaluate(() => window.__draft())).id, await focus()], [null, [gemmaId]]);
 
@@ -322,6 +381,40 @@ check("...nothing left to undo", (await page.evaluate(() => window.__session()))
 // a swim home may take up to TRAVEL_MS (8s), as in the drag-to-reschedule check above
 check("bubbles are back home", await until(async () => (await page.evaluate(() => window.__audit())).length === 0, 8000), true);
 await shot("5-after-reset");
+
+// ── ✕ discards a task, and what is under it ──────────────────────────────────
+const states = async (...titles) => Promise.all(titles.map(async t => (await dbTask(t)).state));
+const flashUndo = page.locator("#flash .flash-act");
+await clickBubble(await rootBubble(BACKLOG));
+await clickBubble(kidBubble("stale branches"));
+await clickOp(kidBubble("stale branches"), "discard");
+check("✕ on a subtask discards it in the db", await until(async () => (await dbTask("stale branches")).state === "discarded"), true);
+check("...it leaves the board, and its parent stays open", [await nodeOf("stale branches"), await focus()], [null, [backlog]]);
+check("...the parent shrinks to what is left and carries the halo", [(await nodeOf(BACKLOG)).load, (await nodeOf(BACKLOG)).pending], [2, true]);
+check("...and the message offers undo", [(await page.innerText("#flash")).includes('discarded "stale branches"'), await flashUndo.innerText()], [true, "undo"]);
+await flashUndo.click();
+check("undo brings it back", await until(async () => (await dbTask("stale branches")).state === "open"), true);
+const clean = () => until(async () => (await page.evaluate(() => window.__session())).staged.length === 0);
+check("...with nothing left to undo, and no halo", [await clean(), await until(async () => !(await nodeOf(BACKLOG)).pending)], [true, true]);
+
+// ↺ on the parent reaches a discarded subtask too, though it is no longer drawn
+await clickBubble(kidBubble("stale branches"));
+await clickOp(kidBubble("stale branches"), "discard");
+await until(async () => (await dbTask("stale branches")).state === "discarded");
+await clickOp(await rootBubble(BACKLOG), "undo");
+check("↺ on the parent restores a subtask discarded under it", await until(async () => (await dbTask("stale branches")).state === "open"), true);
+
+// a task with subtasks takes them with it, deepest first (the server refuses otherwise)
+const seqDiscard = (await edits()).at(-1).seq;
+await clickOp(await rootBubble(BACKLOG), "discard");
+check("✕ on a task discards everything under it", await until(async () => (await states(BACKLOG, "old tickets", "triage them", "stale branches")).every(s => s === "discarded") && true), true);
+check("...subtasks before their parent", (await edits()).filter(e => e.seq > seqDiscard).map(e => [e.type, e.task_id === backlog]).at(-1), ["task.discarded", true]);
+check("...the bubble is gone and nothing is left open", [(await state()).some(n => n.text === BACKLOG), await focus()], [false, []]);
+check("...and the message counts them", (await page.innerText("#flash")).includes("and its 3 subtasks"), true);
+await flashUndo.click();
+check("undo restores the whole task", await until(async () => (await states(BACKLOG, "old tickets", "triage them", "stale branches")).every(s => s === "open") && true), true);
+check("...leaving the session clean", await clean(), true);
+check("...under the parents they had", [(await nodeOf(BACKLOG)).children.map(c => c.text).sort(), (await nodeOf("old tickets")).children.map(c => c.text)], [["old tickets", "stale branches"], ["triage them"]]);
 
 // ── reorganising: a draft, applied when it settles ───────────────────────────
 const parentTitle = async title => {

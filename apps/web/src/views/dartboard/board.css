@@ -77,21 +77,26 @@ body {
 /* Content is vertically CENTRED, always. A circle is widest across its middle,
    so centred content stays inside the rim; anchoring it to the top or bottom
    pushes text into the narrow part where it crosses the boundary. The controls
-   therefore also sit near the centre — that is fine, because opening is a
-   single click on a small idle bubble (nothing under the cursor to mis-hit),
-   and the big open bubble has ample empty rim to click for closing. */
+   are not content: they are small circles placed on the rim itself (see
+   .actions), where they follow the curve and leave the middle to the name.
+   The rim to either side of them stays empty, to click for closing. */
 .body {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 7px; width: 82%; height: 82%;    /* inside the inscribed square, with margin */
   text-align: center; pointer-events: none;
 }
 
+/* The title's lines are broken in board.ts (breakTitle), one .ln each, because each can
+   only be as wide as the circle is at its height. A line may be wider than .body (the
+   middle of a circle is wider than its inscribed square), so lines are centred by flex,
+   which centres an overflowing item too; a block with auto margins would hang right. */
 .text {
   font-size: 14px; line-height: 1.25; color: var(--fg); font-weight: 500;
-  overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3; overflow-wrap: break-word; width: 100%;
+  display: flex; flex-direction: column; align-items: center;
+  width: 100%; white-space: nowrap; flex: none;
 }
-.bubble.is-open > .body > .text { font-size: 16px; -webkit-line-clamp: 3; font-weight: 600; }
+.text .ln { flex: none; overflow: hidden; text-overflow: ellipsis; }
+.bubble.is-open > .body > .text { font-size: 16px; font-weight: 600; }
 .bubble.is-done .text { text-decoration: line-through; }
 
 .zap { font-size: 16px; line-height: 1; }
@@ -100,17 +105,21 @@ body {
   max-width: 100%; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* ── actions — only when open ──────────────────────────────────────────────── */
-/* Two or three, never more: what a drag can't say (⚡ ✓, and ↺ once something has
-   changed). They are small circles, like everything else on the board, and sit last
-   in the centred content group. */
-.actions {
-  display: none; gap: 6px; justify-content: center; align-items: center;
+/* ── controls — only when open, on the rim ─────────────────────────────────── */
+/* Three or four along the bottom, never more: what a drag can't say (⚡ ✓ ✕, and ↺ once
+   something has changed). Opposite them, at the top, the ＋ that adds a subtask. They
+   are small circles, like everything else on the board. .actions covers the bubble and
+   board.ts (placeControls) gives each control its place on the arc, as left/top from
+   the centre; --btn is their diameter at this depth. */
+.actions { display: none; position: absolute; inset: 0; pointer-events: none; }
+.bubble.is-open > .actions { display: block; }
+.act, .add-kid {
+  position: absolute; translate: -50% -50%;
+  width: var(--btn, 28px); height: var(--btn, 28px);
   pointer-events: auto;
 }
-.bubble.is-open > .body > .actions { display: flex; }
 .act {
-  width: 28px; height: 28px; padding: 0; border-radius: 50%;
+  padding: 0; border-radius: 50%;
   display: grid; place-items: center;
   background: var(--bg); color: var(--muted); border: 1px solid var(--line);
   font: inherit; font-size: 14px; line-height: 1; cursor: pointer;
@@ -120,6 +129,7 @@ body {
 .act:focus-visible, .add-kid:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .act.is-on { color: var(--fg); border-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 26%, var(--bg)); }
 .act[data-op="undo"] { color: var(--yellow); }
+.act[data-op="discard"]:hover { border-color: var(--red); color: var(--red); }
 /* ⚡ is an emoji, so it is yellow whether or not it is on. Off, it goes grey. */
 .act[data-op="zap"]:not(.is-on) { filter: grayscale(1); }
 
@@ -143,35 +153,34 @@ body {
 .bubble.kid.is-new { border-color: var(--yellow); }
 .bubble.kid.is-new .text, .bubble.kid.is-open .text { color: var(--fg); }
 
-.bubble.kid .text { font-size: 11px; -webkit-line-clamp: 3; }
-.bubble.kid.is-open > .body > .text { font-size: 13px; -webkit-line-clamp: 3; }
+.bubble.kid .text { font-size: 11px; }
+.bubble.kid.is-open > .body > .text { font-size: 13px; }
 .bubble.kid .meta { font-size: 9px; }
 .bubble.kid .zap { font-size: 11px; }
-.bubble.kid .act { width: 22px; height: 22px; font-size: 11px; }
-.bubble.kid .actions { gap: 4px; }
+.bubble.kid .act { font-size: 11px; }
 .bubble.kid .datepick input { font-size: 10px; padding: 3px 5px; }
 .bubble.kid .hint { font-size: 8px; }
 .bubble.is-d2 .text { font-size: 9px; }
 .bubble.is-d2.is-open > .body > .text { font-size: 11px; }
-.bubble.is-d2 .act { width: 18px; height: 18px; font-size: 9px; }
+.bubble.is-d2 .act { font-size: 9px; }
 .bubble.kid > .body { gap: 4px; }
 
 /* ── ＋ and the bubble being named ─────────────────────────────────────────── */
-/* The ＋ is the next subtask's empty place: last among the subtasks, round like them,
-   and dashed, which on this board already means "not there yet". Pressing it turns it
-   into the new bubble, with a text box where the title will be. */
+/* The ＋ sits at the top of the rim, opposite the other controls. It is dashed, which
+   on this board already means "not there yet". Pressing it puts a new bubble after the
+   subtasks, with a text box where the title will be, and the ＋ steps aside until that
+   bubble is named or thrown away. */
 .add-kid {
-  flex: 0 0 auto; padding: 0; border-radius: 50%;
+  padding: 0; border-radius: 50%;
   display: grid; place-items: center;
-  background: none; color: var(--muted); border: 2px dashed var(--faint);
+  background: var(--bg); color: var(--muted); border: 1.5px dashed var(--muted);
   font: inherit; font-weight: 300; line-height: 1; cursor: pointer;
-  pointer-events: auto;
   transition: border-color .12s ease, color .12s ease, background .12s ease, scale .12s ease;
 }
-.add-kid { font-size: 22px; }
-.bubble.kid .add-kid { font-size: 17px; }
-.bubble.is-d2 .add-kid { font-size: 14px; border-width: 1.5px; }
-.add-kid:hover { color: var(--fg); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); scale: 1.08; }
+.add-kid { font-size: 19px; }
+.bubble.kid .add-kid { font-size: 15px; }
+.bubble.is-d2 .add-kid { font-size: 12px; border-width: 1px; }
+.add-kid:hover { color: var(--fg); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--bg)); scale: 1.08; }
 
 .bubble.kid.is-naming {
   border: 2px solid var(--accent); background: var(--bg); cursor: text;
@@ -250,6 +259,13 @@ body {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   background: var(--red); color: #fff; padding: 8px 14px; border-radius: 6px; font-size: 12px;
 }
+.flash-act {
+  margin-left: 12px; padding: 2px 9px; border-radius: 5px; cursor: pointer;
+  background: rgb(255 255 255 / .18); color: inherit; border: 1px solid rgb(255 255 255 / .55);
+  font: inherit; font-weight: 600;
+}
+.flash-act:hover { background: rgb(255 255 255 / .32); }
+.flash-act:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 
 .fatal {
   position: fixed; inset: 0; display: grid; place-content: center;

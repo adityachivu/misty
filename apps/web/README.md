@@ -11,10 +11,18 @@ same path agent tools will use. Pick a view with `?view=<id>`.
   `category`, ring = `date`/`date_kind`, ⚡ = `quick`. Gestures are recorded edits,
   attributed to `web:dartboard` and tagged with a per-tab session id. The yellow halo
   means "changed this session". ↺ and reset all record `undo_edit`s.
-  An open bubble has two controls, ⚡ and ✓ (plus ↺ once something under it has changed);
-  everything else is a drag. The ＋ after its subtasks turns into a new bubble with a text
-  box in it: ↵ makes it a subtask and offers the next one, esc throws it away, and clicking
+  An open bubble has its name and subtasks in the middle and its controls on the rim.
+  Along the bottom: ⚡, ✓ and ✕ (plus ↺ once something under it has changed); everything
+  else is a drag. ✕ discards the task and everything under it, deepest first, since the
+  server won't discard a task that still has subtasks. The message that follows has an
+  undo button, and ↺ on the bubble it was in restores it too. A task the open
+  reorganisation touches can't be discarded until that is applied or discarded.
+  At the top, opposite the others: ＋, which puts a new bubble with a text box after the
+  subtasks. ↵ makes it a subtask and offers the next one, esc throws it away, and clicking
   or dragging anything else keeps what was typed. The `+` key does the same as the button.
+  Titles are broken into lines in `board.ts` (`breakTitle`), not by CSS: each line is as
+  wide as the circle is at its height, words are kept whole, and what doesn't fit ends in
+  an ellipsis. The element still holds the whole title.
   Reorganising is a draft (ADR 0003, `reorg.ts`): drag a subtask onto another to merge
   them into a new group task, into an open bubble to move it there, or onto empty board to
   make it a root. Click an open subtask's empty space to pop it (its subtasks take its
