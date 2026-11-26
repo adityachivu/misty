@@ -93,7 +93,7 @@ test:
 
 [group('quality')]
 e2e: build
-    cd apps/web && npm run test:e2e
+    cd apps/web && npm run test:unit && npm run test:e2e
 
 [group('quality')]
 fmt:

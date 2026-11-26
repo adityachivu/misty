@@ -93,7 +93,7 @@ const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 await page.clock.setFixedTime(new Date("2026-07-15T09:00:00"));
 const pageErrors = [];
 page.on("pageerror", e => pageErrors.push(e.message));
-await page.goto(BASE);
+await page.goto(`${BASE}/?view=dartboard`);
 await page.waitForSelector("#viewport[data-ready]");
 
 const state = () => page.evaluate(() => window.__state());

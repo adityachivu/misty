@@ -5,8 +5,8 @@ import type { View, ViewContext } from "./views/types";
 // its module, and stylesheets are global: loading two views would let one restyle the
 // other. The first entry is the default.
 const VIEWS: Record<string, () => Promise<View>> = {
-  dartboard: () => import("./views/dartboard").then(m => m.dartboard),
   dartboard2: () => import("./views/dartboard2").then(m => m.dartboard2),
+  dartboard: () => import("./views/dartboard").then(m => m.dartboard),
 };
 
 /** A context whose dispatch refuses anything outside the view's affordances. */

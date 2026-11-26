@@ -55,7 +55,8 @@ test("no two bubbles overlap, and each is inside its band and its quadrant", () 
       const dist = Math.hypot(p.x, p.y);
       const b = band.get(s.ring)!;
       assert.ok(dist - s.d / 2 >= b.inner - 1e-6, `${s.id} pokes inside ${s.ring}`);
-      assert.ok(dist + s.d / 2 <= b.outer + 1e-6, `${s.id} pokes outside ${s.ring}`);
+      // Overdue stays small; its bubbles are allowed to spill outwards.
+      if (s.ring !== "overdue") assert.ok(dist + s.d / 2 <= b.outer + 1e-6, `${s.id} pokes outside ${s.ring}`);
       // Inside its quadrant: clear of both axes.
       assert.ok(Math.abs(p.x) >= s.d / 2 && Math.abs(p.y) >= s.d / 2, `${s.id} crosses an axis`);
       const angle = (Math.atan2(p.y, p.x) + 2 * Math.PI) % (2 * Math.PI);
@@ -70,6 +71,26 @@ test("no two bubbles overlap, and each is inside its band and its quadrant", () 
       }
     }
   }
+});
+
+test("overdue stays small however full it is, and what spills is not overlapped", () => {
+  const empty = layoutBoard([]).bands[0];
+  const crowd: RootSpec[] = [];
+  for (let i = 0; i < 12; i++) crowd.push({ id: `o${i}`, ring: "overdue", quadrant: i % 2, d: 96 });
+  for (let i = 0; i < 6; i++) crowd.push({ id: `t${i}`, ring: "today", quadrant: i % 2, d: 96 });
+  const board = layoutBoard(crowd);
+  assert.deepEqual(board.bands[0], empty);
+  assert.ok(empty.outer <= 100);
+  const reach = (id: string) => { const p = board.at.get(id)!; return Math.hypot(p.x, p.y) + 48; };
+  assert.ok(crowd.some(s => s.ring === "overdue" && reach(s.id) > empty.outer), "the crowd spills");
+  for (const [i, s] of crowd.entries()) {
+    for (const o of crowd.slice(0, i)) {
+      const p = board.at.get(s.id)!, q = board.at.get(o.id)!;
+      assert.ok(Math.hypot(p.x - q.x, p.y - q.y) >= 96 - 1e-6, `${s.id} overlaps ${o.id}`);
+    }
+  }
+  // Today still holds its own bubbles.
+  for (const s of crowd.filter(s => s.ring === "today")) assert.ok(reach(s.id) <= board.bands[1].outer + 1e-6);
 });
 
 test("bands run from the centre outwards without overlapping, and today's is the roomiest", () => {

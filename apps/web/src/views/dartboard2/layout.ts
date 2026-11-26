@@ -55,8 +55,14 @@ export const RING_GAP = 16;
 const GUTTER = 12;
 /** Narrowest each band may be. Today's is the roomiest. */
 const MIN_WIDTH: Record<Ring, number> = {
-  overdue: 150, today: 200, tomorrow: 124, weekend: 124, month: 124, later: 124,
+  overdue: 100, today: 200, tomorrow: 124, weekend: 124, month: 124, later: 124,
 };
+/**
+ * Bands that stay at their narrowest however full they are. Overdue is meant to be
+ * empty, so it doesn't get to push the whole board outwards: its bubbles spill over
+ * the next band instead, and that band's bubbles start beyond them.
+ */
+const FIXED: ReadonlySet<Ring> = new Set<Ring>(["overdue"]);
 /** Today's band is at least this much wider than any other. */
 const TODAY_LEAD = 1.1;
 
@@ -116,7 +122,8 @@ function fillCell(ds: readonly number[], quadrant: number, inner: number): { at:
 
 /**
  * Place every root. Each band is as wide as its fullest quadrant needs (never
- * narrower than its minimum), and today's band is the widest. All roots take part,
+ * narrower than its minimum), except overdue, which stays small and lets its bubbles
+ * spill outwards. Today's band is the widest. All roots take part,
  * drawn or not, so hiding a ring's bubbles never moves another bubble.
  */
 export function layoutBoard(specs: readonly RootSpec[]): BoardLayout {
@@ -130,14 +137,22 @@ export function layoutBoard(specs: readonly RootSpec[]): BoardLayout {
     const bands: Band[] = [];
     const at = new Map<string, Point>();
     let inner = 0;
+    // Per quadrant: where the next band's bubbles may start, past what spilled into it.
+    const spill = [0, 0, 0, 0];
     for (const ring of RINGS) {
       let outer = inner + (ring === "today" ? todayMin : MIN_WIDTH[ring]);
       for (let q = 0; q < 4; q++) {
         const cell = cells.get(`${ring}/${q}`);
         if (!cell) continue;
-        const filled = fillCell(cell.map(s => s.d), q, inner);
+        const filled = fillCell(cell.map(s => s.d), q, Math.max(inner, spill[q]));
         cell.forEach((s, i) => at.set(s.id, filled.at[i]));
-        outer = Math.max(outer, filled.outer);
+        if (FIXED.has(ring)) {
+          // `filled.outer` is the last bubble's edge plus PAD, and a cell starts PAD in.
+          spill[q] = filled.outer - 2 * PAD + GAP;
+        } else {
+          outer = Math.max(outer, filled.outer);
+          spill[q] = 0;
+        }
       }
       bands.push({ ring, inner, outer });
       inner = outer + RING_GAP;

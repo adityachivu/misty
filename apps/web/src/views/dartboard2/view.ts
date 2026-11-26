@@ -345,12 +345,13 @@ export function mountBoard(host: HTMLElement, ctx: ViewContext<BoardTool>): () =
         shape.setAttribute("r", String(b.outer));
         shape.setAttribute("stroke-width", "0");
         shape.classList.add("db2-disc");
-        label.setAttribute("transform", "translate(0 0)");
       } else {
         shape.setAttribute("r", String(mid));
         shape.setAttribute("stroke-width", String(b.outer - b.inner));
-        label.setAttribute("transform", `translate(0 ${-mid}) rotate(-90)`);
       }
+      // Names read left to right, along the axis to the right of the centre. The strip
+      // between the quadrants there is always clear of bubbles.
+      label.setAttribute("transform", `translate(${mid} 0)`);
       shape.dataset.inner = String(b.inner);
       shape.dataset.outer = String(b.outer);
     }

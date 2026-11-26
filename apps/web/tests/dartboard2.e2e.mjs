@@ -309,8 +309,11 @@ async function main() {
     ["today", "tomorrow", "overdue", "weekend", "today"], "each root is in the ring of its earliest open deadline");
   for (const b of g.bubbles) {
     const band = g.bands[b.ring], dist = Math.hypot(b.wx, b.wy);
-    ok(dist - b.wr >= band.inner && dist + b.wr <= band.outer, `${b.title} lies inside the ${b.ring} ring`);
+    // The overdue disc stays small: its bubbles start inside it and may reach past its edge.
+    const spills = b.ring === "overdue";
+    ok(dist - b.wr >= band.inner && (spills ? dist <= band.outer : dist + b.wr <= band.outer), `${b.title} lies inside the ${b.ring} ring`);
   }
+  ok(g.bands.overdue.outer <= 100, `the overdue disc is small: ${g.bands.overdue.outer}`);
   const at = t => g.bubbles.find(b => b.title === t);
   ok(at("Thesis").wx < 0 && at("Thesis").wy < 0, "uni is upper left");
   ok(at("Deploy").wx > 0 && at("Deploy").wy < 0, "work is upper right");
@@ -881,10 +884,13 @@ async function main() {
   // ── H. the two views don't affect each other ────────────────────────────────
   const sheets = () => page.evaluate(() => [...document.querySelectorAll('link[rel="stylesheet"]')].map(l => l.href.split("/").pop()));
   ok((await sheets()).every(s => s.startsWith("dartboard2-")), `only this view's stylesheet is loaded: ${await sheets()}`);
+  await page.goto(`${BASE}/?view=dartboard`);
+  await page.waitForFunction(() => document.querySelector("#app").children.length > 0);
+  ok(!(await page.evaluate(() => !!document.querySelector(".db2"))), "the old view is still there under its own name");
+  ok((await sheets()).every(s => !s.startsWith("dartboard2-")), "and it doesn't load this view's stylesheet");
   await page.goto(`${BASE}/`);
   await page.waitForFunction(() => document.querySelector("#app").children.length > 0);
-  ok(!(await page.evaluate(() => !!document.querySelector(".db2"))), "the default view is not this one");
-  ok((await sheets()).every(s => !s.startsWith("dartboard2-")), "and it doesn't load this view's stylesheet");
+  ok(await page.evaluate(() => !!document.querySelector(".db2")), "with no view named, this one is shown");
 
   eq(problems, [], "no errors in the page");
 

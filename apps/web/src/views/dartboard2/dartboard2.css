@@ -94,7 +94,7 @@
 .db2 .db2-axes { stroke: var(--bg); stroke-width: 6; fill: none; }
 .db2 .db2-ringlabel {
   fill: var(--muted);
-  font-size: 17px;
+  font-size: 14px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   text-anchor: middle;

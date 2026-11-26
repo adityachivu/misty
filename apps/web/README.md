@@ -3,11 +3,24 @@
 Vite + TypeScript. Each view is a module (`src/views/<id>/`) that declares its
 *affordances*, the edit types it may dispatch. `main.ts` hands it a context whose
 `dispatch` refuses anything else. All writes go through `POST /api/commands`, the
-same path agent tools will use. Pick a view with `?view=<id>`.
+same path agent tools will use. Pick a view with `?view=<id>`; with none named you get
+the first one below.
 
 ## Views
 
-- **dartboard** (`src/views/dartboard/`): ported from `~/code/dartboard`. Quadrant =
+- **dartboard2** (`src/views/dartboard2/`): the default. The same board as `dartboard`
+  below (same gestures, same edits, attributed to `web:dartboard2`), rebuilt without a
+  physics simulation: where a bubble sits is computed from the tasks alone (`layout.ts`),
+  so the board is the same on every load and nothing drifts. `model.ts`, `layout.ts`,
+  `fit.ts`, `scene.ts` and `reorg.ts` are pure and have unit tests (`tests/unit/`);
+  `sync.ts` talks to the server and `view.ts` draws.
+  The overdue disc stays small however many tasks are overdue: its bubbles spill over
+  today's ring, and today's bubbles start beyond them. Ring names run left to right along
+  the axis to the right of the centre.
+  Popping two nested levels in one reorganisation is refused, because the server would
+  reject it when it applies.
+- **dartboard** (`src/views/dartboard/`, `?view=dartboard`): the first board, ported from
+  `~/code/dartboard`. Quadrant =
   `category`, ring = `date`/`date_kind`, ⚡ = `quick`. Gestures are recorded edits,
   attributed to `web:dartboard` and tagged with a per-tab session id. The yellow halo
   means "changed this session". ↺ and reset all record `undo_edit`s.
@@ -46,5 +59,6 @@ same path agent tools will use. Pick a view with `?view=<id>`.
 ```sh
 npm run dev         # :5173, proxies /api to `uv run misty serve` on :4322
 npm run build       # dist/, served by `misty serve`
-npm run test:e2e    # needs a build; drives real clicks against a throwaway db
+npm run test:unit   # dartboard2's pure modules, no browser
+npm run test:e2e    # needs a build; drives real clicks against a throwaway db, both views
 ```
